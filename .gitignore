@@ -1,0 +1,42 @@
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+*.env
+
+# Model weights, checkpoints, and dumps
+*.pth
+*.pt
+*.onnx
+*.pkl
+*.pickle
+*.h5
+*.keras
+*.ckpt
+*.pb
+*.tflite
+checkpoint/
+checkpoints/
+models/
+
+# Datasets and large data storage
+*.csv
+*.jsonl
+*.tsv
+*.parquet
+*.npy
+*.npz
+*.hdf5
+data/
+datasets/
+raw_data/
+processed_data/
+
+# Python caching and environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env/
