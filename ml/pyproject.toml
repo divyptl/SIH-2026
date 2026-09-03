@@ -4,4 +4,15 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "torch>=2.5.0",
+    "torchvision>=0.20.0",
+    "transformers>=4.46.0",
+    "torchgeo>=0.6.0",
+    "datasets>=3.0.0",
+    "rasterio>=1.4.0",
+    "scikit-image>=0.24.0",
+    "opencv-python>=4.10.0",
+    "numpy>=2.0.0",
+    "matplotlib>=3.9.0",
+]
