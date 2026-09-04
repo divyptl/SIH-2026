@@ -86,11 +86,15 @@ Captioning              (bi-temporal)   Fusion
 /frontend              # Web app (upload, viewer, results UI)
 /backend               # FastAPI service, controller, validation, report generation
 /ml
+  /datasets            # PyTorch dataset loaders (SEN1-2, BigEarthNet, etc.)
   /vqa                 # VQA + captioning model, training and inference
   /grounding           # Grounding model, training and inference
   /change-detection    # Change VQA model, training and inference
   /fusion              # Optical-SAR fusion model, contrastive pretraining
-  /controller           # Agentic controller — intent parsing, routing, aggregation
+  /controller          # Agentic controller — intent parsing, routing, aggregation
+/data
+  /bigearthnet_mm      # BigEarthNet-MM raw data (gitignored)
+  /sen12               # SEN1-2 download script + raw data (gitignored)
 /docs                  # Architecture notes, evaluation results
 ```
 
@@ -101,11 +105,58 @@ Captioning              (bi-temporal)   Fusion
 | Dataset | Used for |
 |---|---|
 | [BigEarthNet-MM](https://bigearth.net/) | Optical–SAR contrastive pretraining |
+| [SEN1-2 (Sentinel-1&2 Image Pairs)](https://www.kaggle.com/datasets/requiemonk/sentinel12-image-pairs-segregated-by-terrain) | SAR-Optical fusion, SAR analysis (16K paired SAR & optical patches, terrain-labeled) |
 | RSVQA | Visual Question Answering |
 | VRSBench | Captioning, grounding, VQA |
 | CDVQA | Change-based Visual Question Answering |
 
 Evaluation also uses an ISRO/SAC dataset of co-registered Cartosat-2S optical and RISAT SAR image pairs (annotations not disclosed to teams).
+
+### SEN1-2 (Sentinel-1 & 2 Image Pairs)
+
+16,000 co-registered image pairs from Sentinel-1 (SAR) and Sentinel-2 (optical), organized by terrain type (agricultural, barren land, grassland, urban). Derived from the full SEN1-2 dataset (Schmitt et al., 2018).
+
+- **SAR (Sentinel-1):** 8-bit single-channel (sigma-nought backscatter, dB), 256x256 px
+- **Optical (Sentinel-2):** 8-bit RGB (bands B4/B3/B2), 256x256 px
+- **Terrains:** agri (4K pairs), barrenland (4K), grassland (4K), urban (4K)
+- **Paper:** Schmitt M, Hughes LH, Zhu XX (2018). *The SEN1-2 dataset for deep learning in SAR-optical data fusion.* ISPRS Annals.
+
+**Download:**
+
+```bash
+# 1. Set your Kaggle API token as environment variable
+#    Get it from: https://www.kaggle.com/settings
+export KAGGLE_API_TOKEN=your_token_here
+
+# 2. Run the download script
+pip install kaggle
+cd data/sen12
+python download.py                     # Full dataset (~2.7 GB)
+```
+
+**Data structure after download:**
+
+```
+data/sen12/raw/v_2/
+  agri/              # Agricultural land (4,000 pairs)
+    s1/              # SAR patches
+    s2/              # Optical patches
+  barrenland/        # Barren land (4,000 pairs)
+    s1/  s2/
+  grassland/         # Grassland (4,000 pairs)
+    s1/  s2/
+  urban/             # Urban areas (4,000 pairs)
+    s1/  s2/
+```
+
+**Usage in code:**
+
+```python
+from ml.datasets.sen12 import SEN12Dataset
+
+dataset = SEN12Dataset(root="data/sen12/raw", terrains=["urban", "agri"], split="train")
+sar_img, optical_img = dataset[0]  # (1,256,256) and (3,256,256) float32 tensors
+```
 
 ---
 
