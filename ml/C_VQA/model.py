@@ -367,7 +367,7 @@ class TextEncoder(nn.Module):
 # ── Vision-Language Cross-Modal Fusion ───────────────────────────────────
 
 class CrossModalAttentionLayer(nn.Module):
-    """Bidirectional cross-attention between question tokens and visual change tokens."""
+    """Cross-attention between question tokens and visual change tokens."""
 
     def __init__(self, embed_dim: int = 256, num_heads: int = 8, ff_dim: int = 512, dropout: float = 0.1) -> None:
         super().__init__()
@@ -383,13 +383,12 @@ class CrossModalAttentionLayer(nn.Module):
         )
         self.norm2 = nn.LayerNorm(embed_dim)
 
-    def forward(self, query: torch.Tensor, key_value: torch.Tensor, key_padding_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, query: torch.Tensor, key_value: torch.Tensor) -> torch.Tensor:
         """Query attends to Key-Value with residual connection."""
         attn_out, _ = self.cross_attn(
             query=query,
             key=key_value,
             value=key_value,
-            key_padding_mask=key_padding_mask,
         )
         x = self.norm1(query + attn_out)
         ffn_out = self.ffn(x)
