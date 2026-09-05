@@ -17,6 +17,7 @@ dependencies = [
     "matplotlib>=3.9.0",
     "kaggle>=1.6.0",
     "Pillow>=10.0.0",
+    "datasets>=3.0.0",
 ]
 
 [tool.pyrefly]
