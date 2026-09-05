@@ -1,0 +1,21 @@
+# Core (needed for Phase 1: standalone SkyEyeGPT/MiniGPT-v2 inference)
+torch>=2.0
+Pillow
+numpy
+
+# GeoTIFF / multispectral preprocessing
+rasterio
+
+# MiniGPT-v2 itself is NOT pip-installable — clone
+# https://github.com/Vision-CAIR/MiniGPT-4 separately and either:
+#   - add it to PYTHONPATH, or
+#   - `pip install -e .` from inside that cloned repo
+# then install ITS OWN requirements.txt (transformers, accelerate,
+# einops, timm, etc. — versions pinned by that repo, don't guess).
+
+# Optional (Phase 4: LoRA / domain adaptation)
+peft
+bitsandbytes
+
+# Optional (evaluation)
+tqdm
