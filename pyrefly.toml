@@ -1,0 +1,10 @@
+search-path = [
+    ".",
+    "ml",
+    "c:/Users/kella/OneDrive/Desktop/sih/SIH-2026",
+    "c:/Users/kella/OneDrive/Desktop/sih/SIH-2026/ml"
+]
+python-interpreter-path = "C:/Users/kella/AppData/Local/Programs/Python/Python313/python.exe"
+site-package-path = [
+    "C:/Users/kella/AppData/Local/Programs/Python/Python313/Lib/site-packages"
+]

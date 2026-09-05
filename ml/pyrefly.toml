@@ -1,0 +1,22 @@
+search-path = [
+    "..",
+    ".",
+    "c:/Users/kella/OneDrive/Desktop/sih/SIH-2026",
+    "c:/Users/kella/OneDrive/Desktop/sih/SIH-2026/ml",
+    "c:/Users/kella/OneDrive/Desktop/sih/SIH-2026/ml/C_VQA"
+]
+python-interpreter-path = "C:/Users/kella/AppData/Local/Programs/Python/Python313/python.exe"
+site-package-path = [
+    "C:/Users/kella/AppData/Local/Programs/Python/Python313/Lib/site-packages"
+]
+
+# Treat bare fallback imports (config, model, transforms, controller) as Any
+# to avoid duplicate-resolution type conflicts (bad-argument-type errors).
+replace-imports-with-any = [
+    "config",
+    "dataset",
+    "model",
+    "transforms",
+    "controller",
+    "controller.schema"
+]

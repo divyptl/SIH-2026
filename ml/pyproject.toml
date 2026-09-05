@@ -3,7 +3,7 @@ name = "ml"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 dependencies = [
     "torch>=2.5.0",
     "torchvision>=0.20.0",
@@ -17,4 +17,16 @@ dependencies = [
     "matplotlib>=3.9.0",
     "kaggle>=1.6.0",
     "Pillow>=10.0.0",
+]
+
+[tool.pyrefly]
+search-path = [
+    "..",
+    ".",
+    "c:/Users/kella/OneDrive/Desktop/sih/SIH-2026",
+    "c:/Users/kella/OneDrive/Desktop/sih/SIH-2026/ml"
+]
+python-interpreter-path = "C:/Users/kella/AppData/Local/Programs/Python/Python313/python.exe"
+site-package-path = [
+    "C:/Users/kella/AppData/Local/Programs/Python/Python313/Lib/site-packages"
 ]
