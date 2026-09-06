@@ -7,5 +7,12 @@ and aggregating their responses.
 """
 
 from ml.controller.schema import Evidence, ModelRequest, ModelResponse, SpecialistModel
+from ml.controller.agent import AgentController
 
-__all__ = ["Evidence", "ModelRequest", "ModelResponse", "SpecialistModel"]
+__all__ = [
+    "Evidence",
+    "ModelRequest", 
+    "ModelResponse",
+    "SpecialistModel",
+    "AgentController"
+]
