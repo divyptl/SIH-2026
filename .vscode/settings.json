@@ -1,7 +1,0 @@
-{
-    "python.defaultInterpreterPath": "C:\\Users\\kella\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
-    "python.analysis.extraPaths": [
-        "${workspaceFolder}",
-        "${workspaceFolder}/ml"
-    ]
-}
