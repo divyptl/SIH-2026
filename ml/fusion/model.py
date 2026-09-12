@@ -139,14 +139,20 @@ class DualEncoder(nn.Module):
         self.opt_backbone, opt_feat_dim = _make_backbone(backbone, pretrained, in_channels=3)
         self.opt_projector = ProjectionHead(opt_feat_dim, projection_hidden, embed_dim)
 
+        # Cached backbone features (populated during forward(), used by get_backbone_features())
+        self._cached_sar_feat: torch.Tensor | None = None
+        self._cached_opt_feat: torch.Tensor | None = None
+
     def encode_sar(self, x: torch.Tensor) -> torch.Tensor:
         """Encode SAR images to embeddings. Input: (B, 1, H, W) -> (B, embed_dim)."""
         features = self.sar_backbone(x)
+        self._cached_sar_feat = features
         return self.sar_projector(features)
 
     def encode_optical(self, x: torch.Tensor) -> torch.Tensor:
         """Encode optical images to embeddings. Input: (B, 3, H, W) -> (B, embed_dim)."""
         features = self.opt_backbone(x)
+        self._cached_opt_feat = features
         return self.opt_projector(features)
 
     def forward(
@@ -154,16 +160,36 @@ class DualEncoder(nn.Module):
         sar: torch.Tensor,
         optical: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode both modalities. Returns (sar_embeds, optical_embeds)."""
+        """Encode both modalities. Returns (sar_embeds, optical_embeds).
+
+        Also caches backbone features for use by get_backbone_features().
+        """
         return self.encode_sar(sar), self.encode_optical(optical)
 
     def get_backbone_features(
         self,
-        sar: torch.Tensor,
-        optical: torch.Tensor,
+        sar: torch.Tensor | None = None,
+        optical: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Get raw backbone features before projection (for downstream tasks)."""
-        return self.sar_backbone(sar), self.opt_backbone(optical)
+        """Get raw backbone features before projection (for downstream tasks).
+
+        If forward() was called first, returns the cached features (no extra
+        compute). Otherwise falls back to running the backbones directly.
+        """
+        sar_feat = self._cached_sar_feat
+        opt_feat = self._cached_opt_feat
+
+        if sar_feat is None and sar is not None:
+            sar_feat = self.sar_backbone(sar)
+        if opt_feat is None and optical is not None:
+            opt_feat = self.opt_backbone(optical)
+
+        if sar_feat is None or opt_feat is None:
+            raise RuntimeError(
+                "Backbone features unavailable. Call forward() first or pass input tensors."
+            )
+
+        return sar_feat, opt_feat
 
 
 # ── Contrastive Loss ─────────────────────────────────────────────────────

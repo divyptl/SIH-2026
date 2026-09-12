@@ -116,7 +116,7 @@ def train_one_epoch(
         terrain_loss_val = 0.0
         terrain_acc_val = 0.0
         if terrain_head is not None:
-            sar_feat, opt_feat = model.get_backbone_features(sar, optical)
+            sar_feat, opt_feat = model.get_backbone_features()
             terrain_logits = terrain_head(sar_feat.detach(), opt_feat.detach())
             terrain_loss = nn.functional.cross_entropy(terrain_logits, terrain_labels)
             loss = loss + cfg.terrain_loss_weight * terrain_loss
@@ -198,7 +198,7 @@ def evaluate(
 
         terrain_acc = 0.0
         if terrain_head is not None:
-            sar_feat, opt_feat = model.get_backbone_features(sar, optical)
+            sar_feat, opt_feat = model.get_backbone_features()
             terrain_logits = terrain_head(sar_feat, opt_feat)
             terrain_acc = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
 
@@ -284,6 +284,7 @@ def main() -> None:
     parser.add_argument("--data-root", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--num-workers", type=int, default=None, help="DataLoader workers (default: 0 on Windows, 4 otherwise)")
+    parser.add_argument("--save-every", type=int, default=None, help="Save numbered checkpoint every N epochs (default: 1)")
     parser.add_argument("--no-terrain", action="store_true", help="Disable terrain classification head")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
@@ -312,6 +313,8 @@ def main() -> None:
         train_cfg.num_workers = args.num_workers
     elif platform.system() == "Windows":
         train_cfg.num_workers = 0  # multiprocess DataLoader is slow/broken on Windows
+    if args.save_every is not None:
+        train_cfg.save_every = args.save_every
     if args.no_terrain:
         train_cfg.use_terrain_head = False
     if args.device:
@@ -470,7 +473,14 @@ def main() -> None:
             f"[{elapsed:.1f}s]"
         )
 
-        # Save checkpoint
+        # Always save latest.pt so we can resume from the last completed epoch
+        save_checkpoint(
+            train_cfg.checkpoint_path / "latest.pt",
+            epoch, model, loss_fn, terrain_head,
+            optimizer, scheduler, all_metrics, model_cfg,
+        )
+
+        # Save numbered checkpoint at configured interval
         if epoch % train_cfg.save_every == 0:
             save_checkpoint(
                 train_cfg.checkpoint_path / f"epoch_{epoch}.pt",

@@ -43,9 +43,9 @@ class TrainConfig:
     augment: bool = True                # Enable data augmentation
 
     # Optimization
-    batch_size: int = 128
+    batch_size: int = 32
     epochs: int = 50
-    lr: float = 3e-4
+    lr: float = 2e-4
     weight_decay: float = 1e-4
     warmup_epochs: int = 5
     min_lr: float = 1e-6
@@ -56,7 +56,7 @@ class TrainConfig:
 
     # Checkpointing
     checkpoint_dir: str = "checkpoints/fusion"
-    save_every: int = 5                 # Save checkpoint every N epochs
+    save_every: int = 1                 # Save checkpoint every N epochs
     resume_from: str | None = None      # Path to checkpoint to resume from
 
     # Logging
