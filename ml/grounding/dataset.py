@@ -332,7 +332,15 @@ class VRSBenchGroundingDataset(Dataset):
         if not text or not boxes:
             return []
 
-        return [{"text": text, "boxes": boxes, "image_name": image_name}]
+        return [{
+            "text": text,
+            "boxes": boxes,
+            "image_name": image_name,
+            # Kept for evaluation: VRSBench reports accuracy separately for
+            # objects that are / are not the only one of their class in the image
+            "unique": item.get("unique"),
+            "obj_cls": item.get("obj_cls"),
+        }]
 
     @staticmethod
     def _parse_expression(prompt: str) -> str:
