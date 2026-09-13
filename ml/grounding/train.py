@@ -29,7 +29,12 @@ import time
 from pathlib import Path
 
 import os
+from pathlib import Path
 
+# Set Hugging Face cache directory to the project's data folder to avoid C drive
+HF_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "hf_cache"
+os.environ.setdefault("HF_HOME", str(HF_CACHE_DIR))
+os.environ.setdefault("HF_DATASETS_CACHE", str(HF_CACHE_DIR / "datasets"))
 # Reduces allocator fragmentation on long runs. Must be set before the CUDA
 # allocator initialises. Not supported on Windows, where setting it only emits
 # a warning on every run.

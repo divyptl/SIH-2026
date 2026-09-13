@@ -6,6 +6,7 @@ and easy to sweep over.
 """
 
 from __future__ import annotations
+from ml.grounding import dataset
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +34,7 @@ class TrainConfig:
 
     # Data
     data_name: str = "xiang709/VRSBench"   # HuggingFace repo holding VRSBench
-    data_cache_dir: str | None = None      # Local cache dir for HF downloads
+    data_cache_dir: str = "data/vrsbench"  # Local cache dir for HF downloads
     image_dir: str | None = None           # Extracted VRSBench images; skips the
                                            # multi-GB archive download when set
     download_images: bool = True           # Fetch Images_*.zip from the Hub
