@@ -106,10 +106,13 @@ def resolve_amp(device: str, enabled: bool) -> tuple[bool, torch.dtype]:
     bf16 is preferred over fp16: it has the same exponent range as fp32, so it
     needs no loss scaling — which matters here because GroundingDINO's encoder
     loss runs to five figures and would overflow fp16.
+
+    Emulated bf16 is excluded: pre-Ampere GPUs such as Colab's T4 report bf16 as
+    supported but run it without native kernels, far slower than fp16.
     """
     if not enabled or device == "cpu":
         return False, torch.float32
-    if device == "cuda" and torch.cuda.is_bf16_supported():
+    if device == "cuda" and torch.cuda.is_bf16_supported(including_emulation=False):
         return True, torch.bfloat16
     return True, torch.float16
 
@@ -327,6 +330,8 @@ def main() -> None:
     parser.add_argument("--no-download-images", action="store_true",
                         help="Fail instead of downloading VRSBench image archives")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--save-every", type=int, default=None,
+                        help="Keep a numbered epoch_N.pt every N epochs (default 5)")
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--no-freeze-backbone", action="store_true",
                         help="Do NOT freeze the vision backbone")
@@ -371,6 +376,8 @@ def main() -> None:
         train_cfg.download_images = False
     if args.resume:
         train_cfg.resume_from = args.resume
+    if args.save_every:
+        train_cfg.save_every = args.save_every
     if args.no_augment:
         train_cfg.augment = False
     if args.no_amp:
@@ -556,6 +563,13 @@ def main() -> None:
             f"giou={train_metrics['loss_giou']:.4f}"
             f"{val_str}  "
             f"[{elapsed:.1f}s]"
+        )
+
+        # Rolling checkpoint, overwritten every epoch, so an interrupted session
+        # (e.g. a Colab disconnect) loses at most one epoch
+        save_checkpoint(
+            train_cfg.checkpoint_path / "last.pt",
+            epoch, grounding, optimizer, scheduler, all_metrics, model_cfg,
         )
 
         # Save checkpoint
