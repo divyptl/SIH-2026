@@ -1,0 +1,106 @@
+[
+ {
+  "stem": "india-399883",
+  "region": "India",
+  "chip": "399883",
+  "crs": "EPSG:4326",
+  "bounds": [
+   93.3213,
+   26.67637,
+   93.3673,
+   26.72236
+  ],
+  "water_fraction": 0.5199
+ },
+ {
+  "stem": "india-900498",
+  "region": "India",
+  "chip": "900498",
+  "crs": "EPSG:4326",
+  "bounds": [
+   93.73525,
+   26.72236,
+   93.78124,
+   26.76836
+  ],
+  "water_fraction": 0.4728
+ },
+ {
+  "stem": "india-804466",
+  "region": "India",
+  "chip": "804466",
+  "crs": "EPSG:4326",
+  "bounds": [
+   92.81537,
+   26.07845,
+   92.86137,
+   26.12445
+  ],
+  "water_fraction": 0.1916
+ },
+ {
+  "stem": "mekong-922373",
+  "region": "Mekong",
+  "chip": "922373",
+  "crs": "EPSG:4326",
+  "bounds": [
+   105.96958,
+   12.18834,
+   106.01558,
+   12.23434
+  ],
+  "water_fraction": 0.4569
+ },
+ {
+  "stem": "spain-7387658",
+  "region": "Spain",
+  "chip": "7387658",
+  "crs": "EPSG:4326",
+  "bounds": [
+   -0.78189,
+   38.12881,
+   -0.7359,
+   38.17481
+  ],
+  "water_fraction": 0.5837
+ },
+ {
+  "stem": "usa-788696",
+  "region": "USA",
+  "chip": "788696",
+  "crs": "EPSG:4326",
+  "bounds": [
+   -94.93108,
+   38.63474,
+   -94.88509,
+   38.68074
+  ],
+  "water_fraction": 0.4251
+ },
+ {
+  "stem": "sri-lanka-321316",
+  "region": "Sri-Lanka",
+  "chip": "321316",
+  "crs": "EPSG:4326",
+  "bounds": [
+   81.50091,
+   7.95692,
+   81.54691,
+   8.00291
+  ],
+  "water_fraction": 0.3697
+ },
+ {
+  "stem": "india-103447",
+  "region": "India",
+  "chip": "103447",
+  "crs": "EPSG:4326",
+  "bounds": [
+   92.86137,
+   26.81435,
+   92.90736,
+   26.86035
+  ],
+  "water_fraction": 0.1029
+ }
+]

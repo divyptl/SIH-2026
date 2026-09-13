@@ -13,6 +13,9 @@ Usage:
 
     # Resume from checkpoint:
     python -m ml.grounding.train --resume checkpoints/grounding/epoch_10.pt
+
+    # Reuse images you already extracted instead of downloading the archives:
+    python -m ml.grounding.train --image-dir /data/VRSBench/Images_train
 """
 
 from __future__ import annotations
@@ -25,10 +28,23 @@ import sys
 import time
 from pathlib import Path
 
+import os
+
+# Reduces allocator fragmentation on long runs. Must be set before the CUDA
+# allocator initialises. Not supported on Windows, where setting it only emits
+# a warning on every run.
+if platform.system() != "Windows":
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 from torch.utils.data import DataLoader
 
 # Add project root to path
+# Windows consoles default to cp1252, which cannot encode the box-drawing and
+# arrow characters in this module's progress output.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -54,6 +70,50 @@ def get_cosine_schedule(optimizer, warmup_epochs, total_epochs, min_lr, steps_pe
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+# ── Loss weighting ──────────────────────────────────────────────────────
+
+def weighted_loss(
+    loss_dict: dict, weights: dict[str, float],
+) -> torch.Tensor | None:
+    """Recombine GroundingDINO's loss terms under our own weights.
+
+    HF hardcodes the weights inside `loss_grounding_dino`, so the only way to
+    reweight is to rebuild the total from `loss_dict` — whose entries are still
+    attached to the graph. Returns None if nothing matched, so callers can fall
+    back to the model's own total.
+    """
+    total = None
+    for key, weight in weights.items():
+        term = loss_dict.get(key)
+        if term is None or weight == 0 or not isinstance(term, torch.Tensor):
+            continue
+        scaled = term * weight
+        total = scaled if total is None else total + scaled
+    return total
+
+
+def term(loss_dict: dict, key: str) -> float:
+    """Read one loss term out of the dict as a plain float."""
+    value = loss_dict.get(key, 0.0)
+    return value.item() if isinstance(value, torch.Tensor) else float(value)
+
+
+# ── Mixed precision ─────────────────────────────────────────────────────
+
+def resolve_amp(device: str, enabled: bool) -> tuple[bool, torch.dtype]:
+    """Pick the autocast dtype for this device.
+
+    bf16 is preferred over fp16: it has the same exponent range as fp32, so it
+    needs no loss scaling — which matters here because GroundingDINO's encoder
+    loss runs to five figures and would overflow fp16.
+    """
+    if not enabled or device == "cpu":
+        return False, torch.float32
+    if device == "cuda" and torch.cuda.is_bf16_supported():
+        return True, torch.bfloat16
+    return True, torch.float16
+
+
 # ── Training loop ────────────────────────────────────────────────────────
 
 def train_one_epoch(
@@ -65,9 +125,15 @@ def train_one_epoch(
     device: str,
     epoch: int,
     cfg: TrainConfig,
+    scaler: torch.amp.GradScaler | None = None,
+    amp_dtype: torch.dtype = torch.float32,
 ) -> dict[str, float]:
     """Train for one epoch. Returns average metrics."""
     grounding.model.train()
+
+    use_amp = amp_dtype != torch.float32
+    accum = max(cfg.grad_accum_steps, 1)
+    optimizer.zero_grad(set_to_none=True)
 
     total_loss = 0.0
     total_loss_ce = 0.0
@@ -78,38 +144,53 @@ def train_one_epoch(
     for step, batch in enumerate(train_loader):
         # Prepare batch (augmentation + processor)
         inputs, labels = prepare_training_batch(
-            batch, grounding.processor, augmentation, device,
+            batch, grounding.processor, augmentation, device, cfg.image_size,
         )
 
         # Forward pass — GroundingDINO returns losses when labels are provided
-        outputs = grounding(
-            pixel_values=inputs["pixel_values"],
-            input_ids=inputs["input_ids"],
-            attention_mask=inputs.get("attention_mask"),
-            token_type_ids=inputs.get("token_type_ids"),
-            labels=labels,
-        )
+        with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
+            outputs = grounding(
+                pixel_values=inputs["pixel_values"],
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs.get("attention_mask"),
+                token_type_ids=inputs.get("token_type_ids"),
+                labels=labels,
+            )
 
-        loss = outputs.loss
+        loss_dict = outputs.loss_dict or {}
+        loss = weighted_loss(loss_dict, cfg.loss_weights)
+        if loss is None:
+            loss = outputs.loss
 
-        # Backward
-        optimizer.zero_grad()
-        loss.backward()
+        # Backward. Scale down so accumulated grads average rather than sum.
+        if scaler is not None:
+            scaler.scale(loss / accum).backward()
+        else:
+            (loss / accum).backward()
 
-        # Gradient clipping (GroundingDINO benefits from tight clipping)
-        torch.nn.utils.clip_grad_norm_(
-            grounding.model.parameters(), max_norm=cfg.max_grad_norm,
-        )
+        # Step only once per accumulation window
+        if (step + 1) % accum == 0 or (step + 1) == len(train_loader):
+            if scaler is not None:
+                scaler.unscale_(optimizer)
 
-        optimizer.step()
-        scheduler.step()
+            # Gradient clipping (GroundingDINO benefits from tight clipping)
+            torch.nn.utils.clip_grad_norm_(
+                grounding.model.parameters(), max_norm=cfg.max_grad_norm,
+            )
+
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
 
         # Accumulate metrics
-        loss_dict = outputs.loss_dict if hasattr(outputs, "loss_dict") and outputs.loss_dict else {}
         total_loss += loss.item()
-        total_loss_ce += loss_dict.get("loss_ce", torch.tensor(0.0)).item() if isinstance(loss_dict.get("loss_ce"), torch.Tensor) else loss_dict.get("loss_ce", 0.0)
-        total_loss_bbox += loss_dict.get("loss_bbox", torch.tensor(0.0)).item() if isinstance(loss_dict.get("loss_bbox"), torch.Tensor) else loss_dict.get("loss_bbox", 0.0)
-        total_loss_giou += loss_dict.get("loss_giou", torch.tensor(0.0)).item() if isinstance(loss_dict.get("loss_giou"), torch.Tensor) else loss_dict.get("loss_giou", 0.0)
+        total_loss_ce += term(loss_dict, "loss_ce")
+        total_loss_bbox += term(loss_dict, "loss_bbox")
+        total_loss_giou += term(loss_dict, "loss_giou")
         num_batches += 1
 
         # Logging
@@ -137,6 +218,9 @@ def evaluate(
     grounding: GroundingModel,
     val_loader: DataLoader,
     device: str,
+    image_size: int | None = None,
+    amp_dtype: torch.dtype = torch.float32,
+    loss_weights: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Evaluate on the validation set. Returns average loss metrics."""
     grounding.model.eval()
@@ -150,21 +234,25 @@ def evaluate(
     for batch in val_loader:
         inputs, labels = prepare_training_batch(
             batch, grounding.processor, augmentation=None, device=device,
+            image_size=image_size,
         )
 
-        outputs = grounding(
-            pixel_values=inputs["pixel_values"],
-            input_ids=inputs["input_ids"],
-            attention_mask=inputs.get("attention_mask"),
-            token_type_ids=inputs.get("token_type_ids"),
-            labels=labels,
-        )
+        with torch.autocast(device_type=device, dtype=amp_dtype,
+                            enabled=amp_dtype != torch.float32):
+            outputs = grounding(
+                pixel_values=inputs["pixel_values"],
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs.get("attention_mask"),
+                token_type_ids=inputs.get("token_type_ids"),
+                labels=labels,
+            )
 
-        loss_dict = outputs.loss_dict if hasattr(outputs, "loss_dict") and outputs.loss_dict else {}
-        total_loss += outputs.loss.item()
-        total_loss_ce += loss_dict.get("loss_ce", torch.tensor(0.0)).item() if isinstance(loss_dict.get("loss_ce"), torch.Tensor) else loss_dict.get("loss_ce", 0.0)
-        total_loss_bbox += loss_dict.get("loss_bbox", torch.tensor(0.0)).item() if isinstance(loss_dict.get("loss_bbox"), torch.Tensor) else loss_dict.get("loss_bbox", 0.0)
-        total_loss_giou += loss_dict.get("loss_giou", torch.tensor(0.0)).item() if isinstance(loss_dict.get("loss_giou"), torch.Tensor) else loss_dict.get("loss_giou", 0.0)
+        loss_dict = outputs.loss_dict or {}
+        loss = weighted_loss(loss_dict, loss_weights) if loss_weights else None
+        total_loss += (loss if loss is not None else outputs.loss).item()
+        total_loss_ce += term(loss_dict, "loss_ce")
+        total_loss_bbox += term(loss_dict, "loss_bbox")
+        total_loss_giou += term(loss_dict, "loss_giou")
         num_batches += 1
 
     n = max(num_batches, 1)
@@ -233,6 +321,11 @@ def main() -> None:
     parser.add_argument("--model-id", type=str, default=None)
     parser.add_argument("--image-size", type=int, default=None)
     parser.add_argument("--data-name", type=str, default=None)
+    parser.add_argument("--image-dir", type=str, default=None,
+                        help="Directory of extracted VRSBench images; avoids "
+                             "downloading the multi-GB image archives")
+    parser.add_argument("--no-download-images", action="store_true",
+                        help="Fail instead of downloading VRSBench image archives")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--no-freeze-backbone", action="store_true",
@@ -241,6 +334,12 @@ def main() -> None:
                         help="Also freeze the text encoder")
     parser.add_argument("--no-augment", action="store_true",
                         help="Disable training augmentations")
+    parser.add_argument("--no-amp", action="store_true",
+                        help="Disable mixed precision (use full fp32)")
+    parser.add_argument("--grad-accum", type=int, default=None,
+                        help="Accumulate gradients over N batches before stepping")
+    parser.add_argument("--eval-every", type=int, default=None,
+                        help="Run validation every N epochs (default 1)")
     parser.add_argument("--max-samples", type=int, default=None,
                         help="Limit dataset size (for debugging)")
     parser.add_argument("--device", type=str, default=None)
@@ -266,10 +365,20 @@ def main() -> None:
         train_cfg.image_size = args.image_size
     if args.data_name:
         train_cfg.data_name = args.data_name
+    if args.image_dir:
+        train_cfg.image_dir = args.image_dir
+    if args.no_download_images:
+        train_cfg.download_images = False
     if args.resume:
         train_cfg.resume_from = args.resume
     if args.no_augment:
         train_cfg.augment = False
+    if args.no_amp:
+        train_cfg.amp = False
+    if args.grad_accum:
+        train_cfg.grad_accum_steps = args.grad_accum
+    if args.eval_every:
+        train_cfg.eval_every = args.eval_every
     if args.num_workers is not None:
         train_cfg.num_workers = args.num_workers
     elif platform.system() == "Windows":
@@ -278,6 +387,12 @@ def main() -> None:
         train_cfg.device = args.device
 
     device = train_cfg.resolve_device()
+    use_amp, amp_dtype = resolve_amp(device, train_cfg.amp)
+
+    # pin_memory only does anything with an accelerator; leaving it on for a
+    # CPU run just emits a warning every epoch.
+    if device == "cpu":
+        train_cfg.pin_memory = False
 
     print("=" * 70)
     print("  GroundingDINO Fine-Tuning on VRSBench")
@@ -291,22 +406,27 @@ def main() -> None:
     print(f"  Device:          {device}")
     print(f"  Dataset:         {train_cfg.data_name}")
     print(f"  Augmentation:    {train_cfg.augment}")
+    print(f"  Mixed precision: {amp_dtype if use_amp else 'off (fp32)'}")
+    print(f"  Grad accum:      {train_cfg.grad_accum_steps} "
+          f"(effective batch {train_cfg.batch_size * train_cfg.grad_accum_steps})")
     print("=" * 70)
 
     # ── Data ──
     print("\nLoading datasets...")
     train_ds = VRSBenchGroundingDataset(
         data_name=train_cfg.data_name,
-        data_subset=train_cfg.data_subset,
         split="train",
         cache_dir=train_cfg.data_cache_dir,
+        image_dir=train_cfg.image_dir,
+        download_images=train_cfg.download_images,
         max_samples=args.max_samples,
     )
     val_ds = VRSBenchGroundingDataset(
         data_name=train_cfg.data_name,
-        data_subset=train_cfg.data_subset,
         split="validation",
         cache_dir=train_cfg.data_cache_dir,
+        image_dir=train_cfg.image_dir,
+        download_images=train_cfg.download_images,
         max_samples=args.max_samples // 5 if args.max_samples else None,
     )
 
@@ -369,13 +489,23 @@ def main() -> None:
         weight_decay=train_cfg.weight_decay,
     )
 
-    steps_per_epoch = len(train_loader)
+    # The scheduler advances once per optimizer step, not once per batch
+    accum = max(train_cfg.grad_accum_steps, 1)
+    steps_per_epoch = max(len(train_loader) // accum, 1)
     scheduler = get_cosine_schedule(
         optimizer,
         train_cfg.warmup_epochs,
         train_cfg.epochs,
         train_cfg.min_lr,
         steps_per_epoch,
+    )
+
+    # ── Mixed precision ──
+    # fp16 needs loss scaling to avoid underflow; bf16 does not.
+    scaler = (
+        torch.amp.GradScaler(device)
+        if use_amp and amp_dtype == torch.float16
+        else None
     )
 
     # ── Augmentation ──
@@ -399,13 +529,16 @@ def main() -> None:
         # Train
         train_metrics = train_one_epoch(
             grounding, train_loader, optimizer, scheduler,
-            augmentation, device, epoch, train_cfg,
+            augmentation, device, epoch, train_cfg, scaler, amp_dtype,
         )
 
         # Evaluate
         val_metrics = {}
         if epoch % train_cfg.eval_every == 0:
-            val_metrics = evaluate(grounding, val_loader, device)
+            val_metrics = evaluate(
+                grounding, val_loader, device, train_cfg.image_size, amp_dtype,
+                train_cfg.loss_weights,
+            )
 
         elapsed = time.time() - t0
         all_metrics = {**train_metrics, **val_metrics, "epoch": epoch, "time": elapsed}

@@ -50,17 +50,12 @@ import type { AnalysisResponse } from '#/lib/api'
 
 export const Route = createFileRoute('/')({ component: Home })
 
-const ACCEPTED_TYPES = [
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-  'image/tiff',
-  'image/x-tiff',
-]
-const ACCEPTED_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.tif', '.tiff']
+const ACCEPTED_TYPES = ['image/tiff', 'image/x-tiff']
+const ACCEPTED_EXTENSIONS = ['.tif', '.tiff']
 // The picker needs both: some systems report no MIME type at all for GeoTIFF.
 const ACCEPT_ATTRIBUTE = [...ACCEPTED_TYPES, ...ACCEPTED_EXTENSIONS].join(',')
 const MAX_FILE_SIZE = 20 * 1024 * 1024
+const MAX_IMAGES = 2
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -75,23 +70,22 @@ function isAcceptedImage(file: File) {
   return ACCEPTED_EXTENSIONS.some((extension) => name.endsWith(extension))
 }
 
-/** Short format label for the preview badge, e.g. "GEOTIFF" or "PNG". */
-function formatLabel(file: File) {
-  const name = file.name.toLowerCase()
-  if (name.endsWith('.tif') || name.endsWith('.tiff')) return 'TIFF'
-  const subtype = file.type.split('/')[1]
-  return subtype ? subtype.toUpperCase() : 'IMAGE'
+/** Short format label for the preview badge. */
+function formatLabel(_file: File) {
+  return 'GEOTIFF'
 }
 
 function Home() {
   const inputRef = React.useRef<HTMLInputElement>(null)
   const dragDepth = React.useRef(0)
 
-  const [file, setFile] = React.useState<File | null>(null)
-  const [previewUrl, setPreviewUrl] = React.useState<string | null>(null)
+  const [files, setFiles] = React.useState<Array<File>>([])
+  const [previewUrls, setPreviewUrls] = React.useState<Array<string>>([])
   const [prompt, setPrompt] = React.useState('')
   const [isDragging, setIsDragging] = React.useState(false)
-  const [thumbnailFailed, setThumbnailFailed] = React.useState(false)
+  const [failedThumbnails, setFailedThumbnails] = React.useState<Set<number>>(
+    new Set(),
+  )
   const [error, setError] = React.useState<string | null>(null)
 
   const abortRef = React.useRef<AbortController | null>(null)
@@ -99,39 +93,61 @@ function Home() {
   const [result, setResult] = React.useState<AnalysisResponse | null>(null)
   const [apiError, setApiError] = React.useState<string | null>(null)
 
-  // Keep the object URL in sync with the selected file and release it on swap.
+  // Keep the object URLs in sync with the selected files and release them on swap.
   React.useEffect(() => {
-    if (!file) {
-      setPreviewUrl(null)
+    if (files.length === 0) {
+      setPreviewUrls([])
       return
     }
-    const url = URL.createObjectURL(file)
-    setPreviewUrl(url)
-    return () => URL.revokeObjectURL(url)
-  }, [file])
+    const urls = files.map((f) => URL.createObjectURL(f))
+    setPreviewUrls(urls)
+    return () => urls.forEach((url) => URL.revokeObjectURL(url))
+  }, [files])
 
   // Drop any in-flight request if the user navigates away mid-analysis.
   React.useEffect(() => () => abortRef.current?.abort(), [])
 
-  const selectFile = (candidate: File | undefined) => {
-    if (!candidate) return
-    if (!isAcceptedImage(candidate)) {
-      setError('Unsupported format. Use GeoTIFF/TIFF, PNG, JPG or WEBP.')
-      return
-    }
-    if (candidate.size > MAX_FILE_SIZE) {
+  const addFiles = (candidates: Array<File>) => {
+    if (candidates.length === 0) return
+    const room = MAX_IMAGES - files.length
+    if (room <= 0) {
       setError(
-        `Image is too large. Keep it under ${formatBytes(MAX_FILE_SIZE)}.`,
+        `Up to ${MAX_IMAGES} images per analysis (a cross-modal or bi-temporal pair). Remove one first.`,
       )
       return
     }
+    if (candidates.length > room) {
+      setError(
+        `Up to ${MAX_IMAGES} images per analysis. Only the first ${room} of your selection were added.`,
+      )
+      candidates = candidates.slice(0, room)
+    }
+
+    for (const candidate of candidates) {
+      if (!isAcceptedImage(candidate)) {
+        setError('Unsupported format. Upload a GeoTIFF (.tif/.tiff).')
+        return
+      }
+      if (candidate.size > MAX_FILE_SIZE) {
+        setError(
+          `Image is too large. Keep it under ${formatBytes(MAX_FILE_SIZE)}.`,
+        )
+        return
+      }
+    }
+
     setError(null)
-    setThumbnailFailed(false)
-    setFile(candidate)
+    setFailedThumbnails(new Set())
+    setFiles((prev) => [...prev, ...candidates])
   }
 
-  const clearFile = () => {
-    setFile(null)
+  const removeFile = (index: number) => {
+    setError(null)
+    setFiles((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const clearFiles = () => {
+    setFiles([])
     setError(null)
     if (inputRef.current) inputRef.current.value = ''
   }
@@ -153,20 +169,13 @@ function Home() {
     e.preventDefault()
     dragDepth.current = 0
     setIsDragging(false)
-
-    // One image per analysis — reject a multi-file drop rather than silently
-    // picking the first, so the user knows which file was not taken.
-    if (e.dataTransfer.files.length > 1) {
-      setError('One image at a time. Drop a single file.')
-      return
-    }
-    selectFile(e.dataTransfer.files[0])
+    addFiles(Array.from(e.dataTransfer.files))
   }
 
   const handleSubmit = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault()
-    if (!file) {
-      setError('An image is required to run an analysis.')
+    if (files.length === 0) {
+      setError('At least one image is required to run an analysis.')
       return
     }
     if (!prompt.trim() || isAnalysing) return
@@ -184,7 +193,7 @@ function Home() {
     try {
       const response = await analyse({
         prompt: prompt.trim(),
-        images: [file],
+        images: files,
         signal: controller.signal,
       })
       setResult(response)
@@ -203,7 +212,8 @@ function Home() {
     }
   }
 
-  const canSubmit = Boolean(file) && prompt.trim().length > 0 && !isAnalysing
+  const canSubmit =
+    files.length > 0 && prompt.trim().length > 0 && !isAnalysing
 
   return (
     <div className="flex justify-center p-4 sm:p-8">
@@ -221,7 +231,7 @@ function Home() {
             <FieldGroup>
               <Field data-invalid={error ? true : undefined}>
                 <FieldLabel htmlFor="image">
-                  Image
+                  Image(s)
                   <span aria-hidden className="text-destructive">
                     *
                   </span>
@@ -233,49 +243,82 @@ function Home() {
                   name="image"
                   type="file"
                   accept={ACCEPT_ATTRIBUTE}
-                  multiple={false}
+                  multiple={files.length < MAX_IMAGES - 1}
                   aria-required
                   className="sr-only"
-                  onChange={(e) => selectFile(e.target.files?.[0])}
+                  onChange={(e) => {
+                    addFiles(Array.from(e.target.files ?? []))
+                    e.target.value = ''
+                  }}
                 />
 
-                {file && previewUrl ? (
-                  <div className="flex items-center gap-3 rounded-xl border p-2">
-                    {thumbnailFailed ? (
-                      // Browsers cannot decode TIFF/GeoTIFF, so fall back to an
-                      // icon rather than showing a broken image.
-                      <div className="flex size-16 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                        <FileImageIcon />
+                {files.length > 0 ? (
+                  <div className="flex flex-col gap-2">
+                    {files.map((f, index) => (
+                      <div
+                        key={`${f.name}-${index}`}
+                        className="flex items-center gap-3 rounded-xl border p-2"
+                      >
+                        {failedThumbnails.has(index) ? (
+                          // Browsers cannot decode TIFF/GeoTIFF, so fall back
+                          // to an icon rather than showing a broken image.
+                          <div className="flex size-16 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                            <FileImageIcon />
+                          </div>
+                        ) : (
+                          <img
+                            src={previewUrls[index]}
+                            alt={`Preview of ${f.name}`}
+                            onError={() =>
+                              setFailedThumbnails(
+                                (prev) => new Set(prev).add(index),
+                              )
+                            }
+                            className="size-16 shrink-0 rounded-lg object-cover"
+                          />
+                        )}
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <span className="truncate text-sm font-medium">
+                            {f.name}
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <Badge variant="secondary">
+                              {formatLabel(f)}
+                            </Badge>
+                            <span className="text-xs text-muted-foreground">
+                              {formatBytes(f.size)}
+                            </span>
+                          </div>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={`Remove ${f.name}`}
+                          className="ml-auto"
+                          onClick={() => removeFile(index)}
+                        >
+                          <XIcon />
+                        </Button>
                       </div>
-                    ) : (
-                      <img
-                        src={previewUrl}
-                        alt={`Preview of ${file.name}`}
-                        onError={() => setThumbnailFailed(true)}
-                        className="size-16 shrink-0 rounded-lg object-cover"
-                      />
-                    )}
-                    <div className="flex min-w-0 flex-col gap-1">
-                      <span className="truncate text-sm font-medium">
-                        {file.name}
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        <Badge variant="secondary">{formatLabel(file)}</Badge>
-                        <span className="text-xs text-muted-foreground">
-                          {formatBytes(file.size)}
-                        </span>
+                    ))}
+                    {files.length < MAX_IMAGES ? (
+                      <div
+                        onDragEnter={onDragEnter}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDragLeave={onDragLeave}
+                        onDrop={onDrop}
+                        onClick={() => inputRef.current?.click()}
+                        className={cn(
+                          'cursor-pointer rounded-xl border border-dashed py-3 text-center text-sm text-muted-foreground transition-colors hover:bg-muted/50',
+                          isDragging && 'border-ring bg-muted/50',
+                        )}
+                      >
+                        {isDragging
+                          ? 'Drop to attach'
+                          : 'Add a second image (optical+SAR pair or before/after)'}
                       </div>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label="Remove image"
-                      className="ml-auto"
-                      onClick={clearFile}
-                    >
-                      <XIcon />
-                    </Button>
+                    ) : null}
                   </div>
                 ) : (
                   <div
@@ -295,10 +338,13 @@ function Home() {
                           <ImageUpIcon />
                         </EmptyMedia>
                         <EmptyTitle>
-                          {isDragging ? 'Drop to attach' : 'Drop an image here'}
+                          {isDragging
+                            ? 'Drop to attach'
+                            : 'Drop image(s) here'}
                         </EmptyTitle>
                         <EmptyDescription>
-                          or click to browse &mdash; one image per analysis
+                          or click to browse &mdash; one image, or two for a
+                          cross-modal / bi-temporal pair
                         </EmptyDescription>
                       </EmptyHeader>
                     </Empty>
@@ -306,8 +352,9 @@ function Home() {
                 )}
 
                 <FieldDescription>
-                  Required. Exactly one GeoTIFF, TIFF, PNG, JPG or WEBP, up to{' '}
-                  {formatBytes(MAX_FILE_SIZE)}.
+                  Required. One georeferenced GeoTIFF (.tif/.tiff), or two for a
+                  co-registered optical+SAR pair or before/after comparison
+                  &mdash; each up to {formatBytes(MAX_FILE_SIZE)}.
                 </FieldDescription>
                 {error ? <FieldError>{error}</FieldError> : null}
               </Field>
@@ -332,13 +379,16 @@ function Home() {
                   <InputGroupAddon align="block-end">
                     <InputGroupButton
                       type="button"
+                      disabled={files.length >= MAX_IMAGES}
                       onClick={() => inputRef.current?.click()}
                     >
                       <PaperclipIcon />
-                      {file ? 'Replace image' : 'Attach image'}
+                      {files.length > 0 ? 'Add image' : 'Attach image'}
                     </InputGroupButton>
                     <InputGroupText className="ml-auto text-xs">
-                      {file ? '1 attachment' : 'No attachment'}
+                      {files.length === 0
+                        ? 'No attachment'
+                        : `${files.length} attachment${files.length > 1 ? 's' : ''}`}
                     </InputGroupText>
                   </InputGroupAddon>
                 </InputGroup>
@@ -350,9 +400,9 @@ function Home() {
             <Button
               type="button"
               variant="ghost"
-              disabled={(!file && !prompt) || isAnalysing}
+              disabled={(files.length === 0 && !prompt) || isAnalysing}
               onClick={() => {
-                clearFile()
+                clearFiles()
                 setPrompt('')
                 setResult(null)
                 setApiError(null)

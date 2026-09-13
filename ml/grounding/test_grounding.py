@@ -18,6 +18,11 @@ import sys
 from pathlib import Path
 
 # Add project root to path
+# Windows consoles default to cp1252, which cannot encode the box-drawing and
+# arrow characters in this module's progress output.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -203,9 +208,10 @@ def main():
     try:
         test_model_loading()
         test_inference_wrapper()
-    except Exception as e:
-        print(f"  ⚠ Model tests skipped: {e}")
-        print("  (This is expected if you don't have internet or enough disk space)")
+    except OSError as e:
+        # Only a failed download is tolerable here. Catching everything meant a
+        # real API break (a renamed kwarg) was reported as a pass.
+        print(f"  ⚠ Model tests skipped — download unavailable: {e}")
 
     print("\n" + "=" * 50)
     print("  All smoke tests passed!")

@@ -32,17 +32,45 @@ class TrainConfig:
     """Training hyperparameters."""
 
     # Data
-    data_name: str = "xiang709/VRSBench"   # HuggingFace dataset name
-    data_subset: str = "VRSBench"          # HuggingFace dataset config name
-    data_cache_dir: str | None = None      # Local cache dir for HF datasets
+    data_name: str = "xiang709/VRSBench"   # HuggingFace repo holding VRSBench
+    data_cache_dir: str | None = None      # Local cache dir for HF downloads
+    image_dir: str | None = None           # Extracted VRSBench images; skips the
+                                           # multi-GB archive download when set
+    download_images: bool = True           # Fetch Images_*.zip from the Hub
     num_workers: int = 2
     pin_memory: bool = True
 
     # Image preprocessing
-    image_size: int = 800               # GroundingDINO default input size
+    image_size: int = 512               # VRSBench tiles are natively 512x512;
+                                        # the processor default (800) upscales
+                                        # them and inflates activation memory
 
     # Augmentation
     augment: bool = True                # Enable training augmentations
+
+    # Loss weighting. Applied to GroundingDINO's individual loss terms in place
+    # of the hardcoded weights in HF's `loss_grounding_dino`.
+    #
+    # `loss_ce_enc` is zeroed. On this checkpoint the two-stage encoder's
+    # classification logits are uncalibrated against the text tokens — they span
+    # -140..+66 and score 65% of (query, token) pairs above 0.5, where the
+    # decoder's span -8..0 and score 0.01% above. Focal loss over that many
+    # confident-wrong predictions comes out ~5,000x the decoder's term, which at
+    # HF's default weight of 2.0 is 99.98% of the total loss and leaves box
+    # regression with no effective gradient. The encoder's box terms are kept.
+    loss_weights: dict[str, float] = field(default_factory=lambda: {
+        "loss_ce": 2.0,
+        "loss_bbox": 5.0,
+        "loss_giou": 2.0,
+        "loss_ce_enc": 0.0,
+        "loss_bbox_enc": 5.0,
+        "loss_giou_enc": 2.0,
+    })
+
+    # Memory / throughput
+    amp: bool = True                    # Mixed precision (bf16 on CUDA)
+    grad_accum_steps: int = 1           # Optimizer step every N batches; raises
+                                        # effective batch at batch-size memory
 
     # Optimization
     batch_size: int = 4                 # Small batches (GroundingDINO is ~172M params)

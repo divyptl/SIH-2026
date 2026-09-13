@@ -76,7 +76,8 @@ async def analyse(
     images: list[UploadFile] = File(
         ...,
         description=(
-            "One image, or two for a co-registered optical+SAR pair or a bi-temporal pair."
+            "One georeferenced GeoTIFF, or two for a co-registered optical+SAR pair "
+            "or a bi-temporal pair."
         ),
     ),
     modalities: str | None = Form(

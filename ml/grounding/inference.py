@@ -181,7 +181,7 @@ class GroundingInference:
         results = self.grounding.processor.post_process_grounded_object_detection(
             outputs,
             input_ids=inputs["input_ids"],
-            box_threshold=box_thr,
+            threshold=box_thr,
             text_threshold=text_thr,
             target_sizes=target_sizes,
         )
@@ -192,13 +192,15 @@ class GroundingInference:
             r = results[0]
             boxes = r["boxes"].cpu().numpy()       # (N, 4) xyxy
             scores = r["scores"].cpu().numpy()     # (N,)
-            labels = r["labels"]                   # list[str]
+            # `labels` is deprecated and will return integer ids; `text_labels`
+            # is the replacement that keeps the matched phrase as a string.
+            labels = r.get("text_labels", r.get("labels", []))
 
             for box, score, label in zip(boxes, scores, labels):
                 detections.append({
                     "box": [round(float(c), 2) for c in box],
                     "score": round(float(score), 4),
-                    "label": label.strip(),
+                    "label": str(label).strip(),
                 })
 
         return detections

@@ -1,9 +1,9 @@
 """Upload decoding, compatibility checking, and VLM-ready encoding.
 
 Covers the problem statement's "input upload and compatibility checking" step:
-formats are restricted to GeoTIFF/TIFF plus the benchmark PNG/JPEG formats,
-pairs must be spatially corresponding, and every raster is normalised into an
-8-bit RGB PNG data URI before it reaches a vision-language model.
+uploads are restricted to georeferenced GeoTIFF rasters, pairs must be
+spatially corresponding, and every raster is normalised into an 8-bit RGB PNG
+data URI before it reaches a vision-language model.
 """
 
 from __future__ import annotations
@@ -16,18 +16,13 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from schemas import ImageInfo, Modality
 
-# GeoTIFF is a TIFF with extra tags, so Pillow reports both as "TIFF".
-GEOSPATIAL_FORMATS = {"TIFF"}
-BENCHMARK_FORMATS = {"PNG", "JPEG", "WEBP"}
-ALLOWED_FORMATS = GEOSPATIAL_FORMATS | BENCHMARK_FORMATS
+# GeoTIFF is a TIFF with extra tags, so Pillow reports both as "TIFF"; the
+# georeferencing-tag check below is what separates a GeoTIFF from a plain TIFF.
+ALLOWED_FORMATS = {"TIFF"}
 
 ALLOWED_EXTENSIONS = {
     ".tif",
     ".tiff",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".webp",
 }
 
 # GeoTIFF private tags. Presence of either means the raster carries a CRS and
@@ -42,6 +37,11 @@ _ASPECT_TOLERANCE = 0.02
 
 # Longest edge of the JPEG preview handed back to the client.
 PREVIEW_MAX_EDGE_PX = 768
+
+# Percentile trimmed from each end of the histogram when stretching a >8-bit
+# raster. A handful of bright scatterers (urban double-bounce in SAR, specular
+# water glint in optical) otherwise compress the whole scene into a few levels.
+_STRETCH_CUTOFF_PCT = 1
 
 
 class ImageValidationError(ValueError):
@@ -96,18 +96,52 @@ def _is_georeferenced(image: Image.Image) -> bool:
     )
 
 
+def _stretch_high_bit_depth(image: Image.Image) -> Image.Image:
+    """Linearly rescale a >8-bit raster into 8-bit greyscale.
+
+    Converting straight to ``L`` *clips* at 255 rather than rescaling, so a
+    16-bit Sentinel product — DN values run to five figures — arrives as a
+    near-white blob, and a float sigma0 raster in dB (negative values) as pure
+    black. Map the actual data range onto 0-255 first, then autocontrast with a
+    small percentile cutoff to drop outliers.
+    """
+    # I;16 variants cannot be fed to point() directly; widening to "I" (32-bit
+    # int) is lossless. Float rasters stay in "F" so that reflectance in 0..1
+    # and backscatter in dB are not truncated to a couple of integer levels.
+    wide = image if image.mode == "F" else image.convert("I")
+    low, high = wide.getextrema()
+    if high <= low:
+        # Constant raster: nothing to stretch, and the scale below would divide
+        # by zero.
+        return Image.new("L", wide.size, 0)
+
+    scale = 255.0 / (high - low)
+    # point() keeps reporting mode "I" here, but the values it produces are
+    # already inside 0..255, so the convert is lossless.
+    rescaled = wide.point(lambda value: (value - low) * scale).convert("L")
+    return ImageOps.autocontrast(rescaled, cutoff=_STRETCH_CUTOFF_PCT)
+
+
 def _to_display_rgb(image: Image.Image) -> Image.Image:
     """Normalise any supported raster into 8-bit RGB.
 
     Single-band SAR and 16-bit panchromatic rasters are contrast-stretched to
-    the full 8-bit range; without this a 16-bit GeoTIFF renders as near-black
-    and the model has nothing to look at.
+    the full 8-bit range; without this a 16-bit GeoTIFF collapses to a flat
+    single-colour image and the model has nothing to look at.
     """
     if image.mode in {"I;16", "I;16B", "I;16L", "I", "F"}:
-        stretched = ImageOps.autocontrast(image.convert("F").convert("L"))
-        return stretched.convert("RGB")
+        return _stretch_high_bit_depth(image).convert("RGB")
     if image.mode in {"L", "LA"}:
         return ImageOps.autocontrast(image.convert("L")).convert("RGB")
+    if image.mode in {"RGBA", "P"}:
+        # Flatten onto white rather than converting directly: dropping the
+        # alpha channel via .convert("RGB") leaves transparent pixels at
+        # whatever RGB value they happened to store (often black), which
+        # shows up as a stray black wedge over no-data image edges.
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[3])
+        return background
     if image.mode != "RGB":
         return image.convert("RGB")
     return image
@@ -123,7 +157,7 @@ def prepare_upload(
     max_bytes: int,
     max_edge_px: int,
 ) -> PreparedImage:
-    """Validate one upload and encode it as a PNG data URI."""
+    """Validate one GeoTIFF upload and encode it as a PNG data URI."""
     if not raw:
         raise ImageValidationError(f"'{filename}' is empty.")
 
@@ -138,7 +172,7 @@ def prepare_upload(
         image.load()
     except UnidentifiedImageError as exc:
         raise ImageValidationError(
-            f"'{filename}' is not a readable image. Supported: GeoTIFF/TIFF, PNG, JPEG, WEBP."
+            f"'{filename}' is not a readable image. Uploads must be a GeoTIFF (.tif/.tiff)."
         ) from exc
     except OSError as exc:
         raise ImageValidationError(f"'{filename}' could not be decoded: {exc}") from exc
@@ -147,17 +181,17 @@ def prepare_upload(
     if detected not in ALLOWED_FORMATS:
         raise ImageValidationError(
             f"'{filename}' is {detected}, which is not supported. "
-            "Use GeoTIFF/TIFF for geospatial imagery, or PNG/JPEG for benchmark data."
+            "Uploads must be a GeoTIFF (.tif/.tiff)."
         )
 
-    notes: list[str] = []
-    georeferenced = detected == "TIFF" and _is_georeferenced(image)
-    if detected == "TIFF":
-        notes.append(
-            "GeoTIFF: georeferencing tags present."
-            if georeferenced
-            else "Plain TIFF: no georeferencing tags found, results are pixel-space only."
+    georeferenced = _is_georeferenced(image)
+    if not georeferenced:
+        raise ImageValidationError(
+            f"'{filename}' is a plain TIFF with no georeferencing tags. "
+            "Upload a GeoTIFF that carries a CRS and a pixel-to-world transform."
         )
+
+    notes: list[str] = ["GeoTIFF: georeferencing tags present."]
 
     modality = _infer_modality(filename, image, declared_modality)
     width, height = image.size

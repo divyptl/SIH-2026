@@ -92,6 +92,7 @@ def prepare_training_batch(
     processor,
     augmentation: GroundingAugmentation | None = None,
     device: str = "cpu",
+    image_size: int | None = None,
 ) -> tuple[dict, list[dict]]:
     """Prepare a collated batch for GroundingDINO training.
 
@@ -104,6 +105,9 @@ def prepare_training_batch(
         processor: GroundingDinoProcessor from HF.
         augmentation: Optional augmentation to apply per sample.
         device: Target device for tensors.
+        image_size: Resize images to this square size. Defaults to the
+            processor's own setting (shortest edge 800), which upscales
+            VRSBench's native 512x512 tiles and inflates activation memory.
 
     Returns:
         (inputs, labels) where:
@@ -128,12 +132,34 @@ def prepare_training_batch(
         images = aug_images
         labels = aug_labels
 
+    # Build the GroundingDINO prompt here rather than letting the processor
+    # infer it. The processor treats a list of period-free strings as candidate
+    # labels for ONE image and merges them into a single prompt ("a cat. a
+    # dog."), which collapses the text batch to 1 and blows up in the fusion
+    # layer. Terminating every prompt with "." makes that heuristic a no-op, so
+    # each image keeps its own text regardless of how the expression was
+    # punctuated upstream.
+    prompts = []
+    for text in texts:
+        prompt = text.strip().lower()
+        if not prompt.endswith("."):
+            prompt += "."
+        prompts.append(prompt)
+
     # Run through HF processor (handles image normalization + text tokenization)
+    processor_kwargs = {}
+    if image_size is not None:
+        processor_kwargs["size"] = {
+            "shortest_edge": image_size,
+            "longest_edge": image_size,
+        }
+
     inputs = processor(
         images=images,
-        text=texts,
+        text=prompts,
         return_tensors="pt",
         padding=True,
+        **processor_kwargs,
     )
 
     # Move inputs to device
