@@ -16,7 +16,7 @@ class ModelConfig:
     """Architecture hyperparameters."""
 
     # Backbone
-    backbone: str = "resnet18"          # resnet18 | resnet34 | resnet50
+    backbone: str = "convnext_tiny"     # convnext_tiny | resnet18 | resnet34 | resnet50
     pretrained: bool = True             # ImageNet pretrained backbone
 
     # Projection head
@@ -65,6 +65,7 @@ class TrainConfig:
 
     # Device
     device: str = "auto"               # auto | cuda | cpu
+    use_amp: bool = True                # Mixed-precision training (halves VRAM usage)
 
     @property
     def checkpoint_path(self) -> Path:

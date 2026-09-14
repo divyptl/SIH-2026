@@ -16,7 +16,7 @@ class ModelConfig:
     """Architecture hyperparameters for Siamese Vision Encoder + VLM Head."""
 
     # Vision backbone (shared weights for T1 and T2 images)
-    backbone: str = "resnet18"          # resnet18 | resnet34 | resnet50
+    backbone: str = "convnext_tiny"     # convnext_tiny | resnet18 | resnet34 | resnet50
     pretrained: bool = True             # ImageNet pretrained backbone
     in_channels: int = 3                # Number of channels (3 for RGB optical)
 
@@ -82,6 +82,7 @@ class TrainConfig:
 
     # Device
     device: str = "auto"               # auto | cuda | cpu
+    use_amp: bool = True                # Mixed-precision training (halves VRAM usage)
 
     @property
     def checkpoint_path(self) -> Path:

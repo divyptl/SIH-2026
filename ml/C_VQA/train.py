@@ -123,6 +123,10 @@ class ChangeVQATrainer:
         self.checkpoint_dir = Path(self.cfg.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+        # Mixed-precision training (AMP)
+        self.use_amp = self.cfg.use_amp and self.device == "cuda"
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+
     def train_epoch(self, epoch: int) -> dict[str, float]:
         """Run one training epoch."""
         self.model.train()
@@ -141,12 +145,15 @@ class ChangeVQATrainer:
 
             self.optimizer.zero_grad()
 
-            outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
-            loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
+                loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
 
-            loss.backward()
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
             nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             self.scheduler.step()
 
             total_loss += loss.item()
@@ -189,9 +196,9 @@ class ChangeVQATrainer:
             q_ids = batch["question_ids"].to(self.device)
             ans_targets = batch["answer_targets"].to(self.device)
             mask_targets = batch["mask_targets"].to(self.device) if batch["mask_targets"] is not None else None
-
-            outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
-            loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
+                loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
 
             total_loss += loss.item()
             total_vqa_acc += metrics.get("vqa_accuracy", 0.0)
@@ -203,10 +210,10 @@ class ChangeVQATrainer:
             "val_mask_iou": total_mask_iou / max(1, num_batches),
         }
 
-    def save_checkpoint(self, path: Path, is_best: bool = False) -> None:
-        """Save training checkpoint to disk."""
-        ckpt = {
-            "epoch": self.start_epoch,
+    def _build_checkpoint(self, epoch: int) -> dict[str, Any]:
+        """Build a checkpoint dict for the current training state."""
+        return {
+            "epoch": epoch,
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
@@ -215,11 +222,34 @@ class ChangeVQATrainer:
             "train_config": vars(self.cfg),
             "answers_vocab": self.model.answers_vocab,
         }
-        torch.save(ckpt, path)
+
+    def save_checkpoint(self, epoch: int, is_best: bool = False) -> None:
+        """Save training checkpoint to disk.
+
+        Always saves:
+          - ``latest.pt``      — most recent epoch (for easy resume)
+          - ``epoch_NNN.pt``   — individual epoch snapshot
+
+        Conditionally saves:
+          - ``best.pt``        — only when *is_best* is True
+        """
+        ckpt = self._build_checkpoint(epoch)
+
+        # 1. Individual epoch file
+        epoch_path = self.checkpoint_dir / f"epoch_{epoch:03d}.pt"
+        torch.save(ckpt, epoch_path)
+
+        # 2. latest.pt (always overwritten)
+        latest_path = self.checkpoint_dir / "latest.pt"
+        torch.save(ckpt, latest_path)
+
+        print(f"[ChangeVQATrainer] Saved epoch_{epoch:03d}.pt + latest.pt")
+
+        # 3. best.pt (only when improved)
         if is_best:
             best_path = self.checkpoint_dir / "best.pt"
             torch.save(ckpt, best_path)
-            print(f"[ChangeVQATrainer] Saved new best checkpoint to {best_path}")
+            print(f"[ChangeVQATrainer] New best checkpoint! (score={self.best_metric:.4f}) -> best.pt")
 
     def fit(self) -> list[dict[str, Any]]:
         """Run the full training loop across all epochs."""
@@ -254,9 +284,8 @@ class ChangeVQATrainer:
 
             self.history.append(epoch_log)
 
-            # Checkpointing
-            if epoch % self.cfg.save_every == 0 or epoch == self.cfg.epochs:
-                self.save_checkpoint(self.checkpoint_dir / f"epoch_{epoch:03d}.pt", is_best=is_best)
+            # Checkpoint every epoch: epoch_NNN.pt + latest.pt (+ best.pt when improved)
+            self.save_checkpoint(epoch, is_best=is_best)
 
             # Save metrics history
             with open(self.checkpoint_dir / "metrics.json", "w", encoding="utf-8") as f:

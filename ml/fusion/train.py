@@ -82,6 +82,8 @@ def train_one_epoch(
     train_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
+    scaler: torch.amp.GradScaler | None,
+    use_amp: bool,
     device: str,
     epoch: int,
     cfg: TrainConfig,
@@ -106,33 +108,41 @@ def train_one_epoch(
         terrain_labels = terrain_labels.to(device)
 
         # Forward: get embeddings
-        sar_emb, opt_emb = model(sar, optical)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            sar_emb, opt_emb = model(sar, optical)
 
-        # Contrastive loss
-        contrastive_loss, contrastive_metrics = loss_fn(sar_emb, opt_emb)
-        loss = contrastive_loss
+            # Contrastive loss
+            contrastive_loss, contrastive_metrics = loss_fn(sar_emb, opt_emb)
+            loss = contrastive_loss
 
-        # Terrain classification (multi-task)
-        terrain_loss_val = 0.0
-        terrain_acc_val = 0.0
-        if terrain_head is not None:
-            sar_feat, opt_feat = model.get_backbone_features()
-            terrain_logits = terrain_head(sar_feat.detach(), opt_feat.detach())
-            terrain_loss = nn.functional.cross_entropy(terrain_logits, terrain_labels)
-            loss = loss + cfg.terrain_loss_weight * terrain_loss
-            terrain_loss_val = terrain_loss.item()
-            terrain_acc_val = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
+            # Terrain classification (multi-task)
+            terrain_loss_val = 0.0
+            terrain_acc_val = 0.0
+            if terrain_head is not None:
+                sar_feat, opt_feat = model.get_backbone_features()
+                terrain_logits = terrain_head(sar_feat.detach(), opt_feat.detach())
+                terrain_loss = nn.functional.cross_entropy(terrain_logits, terrain_labels)
+                loss = loss + cfg.terrain_loss_weight * terrain_loss
+                terrain_loss_val = terrain_loss.item()
+                terrain_acc_val = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
 
         # Backward
         optimizer.zero_grad()
-        loss.backward()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if terrain_head is not None:
+                torch.nn.utils.clip_grad_norm_(terrain_head.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if terrain_head is not None:
+                torch.nn.utils.clip_grad_norm_(terrain_head.parameters(), max_norm=1.0)
+            optimizer.step()
 
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        if terrain_head is not None:
-            torch.nn.utils.clip_grad_norm_(terrain_head.parameters(), max_norm=1.0)
-
-        optimizer.step()
         scheduler.step()
 
         # Accumulate metrics
@@ -175,6 +185,7 @@ def evaluate(
     terrain_head: TerrainClassifier | None,
     val_loader: DataLoader,
     device: str,
+    use_amp: bool = False,
 ) -> dict[str, float]:
     """Evaluate on the validation set."""
     model.eval()
@@ -193,14 +204,15 @@ def evaluate(
         optical = normalize_optical(optical.to(device))
         terrain_labels = terrain_labels.to(device)
 
-        sar_emb, opt_emb = model(sar, optical)
-        _, metrics = loss_fn(sar_emb, opt_emb)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            sar_emb, opt_emb = model(sar, optical)
+            _, metrics = loss_fn(sar_emb, opt_emb)
 
-        terrain_acc = 0.0
-        if terrain_head is not None:
-            sar_feat, opt_feat = model.get_backbone_features()
-            terrain_logits = terrain_head(sar_feat, opt_feat)
-            terrain_acc = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
+            terrain_acc = 0.0
+            if terrain_head is not None:
+                sar_feat, opt_feat = model.get_backbone_features()
+                terrain_logits = terrain_head(sar_feat, opt_feat)
+                terrain_acc = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
 
         total_loss += metrics["loss"]
         total_s2o_acc += metrics["sar2opt_acc"]
@@ -394,7 +406,10 @@ def main() -> None:
     terrain_head = None
     if train_cfg.use_terrain_head:
         # Get backbone feature dim
-        feat_dim = 512 if model_cfg.backbone in ("resnet18", "resnet34") else 2048
+        if model_cfg.backbone == "convnext_tiny":
+            feat_dim = 768
+        else:
+            feat_dim = 512 if model_cfg.backbone in ("resnet18", "resnet34") else 2048
         terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=4).to(device)
 
     total_params = sum(p.numel() for p in model.parameters()) / 1e6
@@ -431,6 +446,10 @@ def main() -> None:
             optimizer, scheduler, device,
         ) + 1
 
+    # ── AMP setup ──
+    use_amp = train_cfg.use_amp and device == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+
     # ── Training loop ──
     print(f"\nStarting training from epoch {start_epoch}...\n")
     best_val_loss = float("inf")
@@ -442,13 +461,13 @@ def main() -> None:
         # Train
         train_metrics = train_one_epoch(
             model, loss_fn, terrain_head, train_loader,
-            optimizer, scheduler, device, epoch, train_cfg,
+            optimizer, scheduler, scaler, use_amp, device, epoch, train_cfg,
         )
 
         # Evaluate
         val_metrics = {}
         if epoch % train_cfg.eval_every == 0:
-            val_metrics = evaluate(model, loss_fn, terrain_head, val_loader, device)
+            val_metrics = evaluate(model, loss_fn, terrain_head, val_loader, device, use_amp)
 
         elapsed = time.time() - t0
         all_metrics = {**train_metrics, **val_metrics, "epoch": epoch, "time": elapsed}

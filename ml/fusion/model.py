@@ -33,10 +33,10 @@ from torchvision import models
 # ── Backbone factory ────────────────────────────────────────────────────
 
 def _make_backbone(name: str, pretrained: bool, in_channels: int) -> tuple[nn.Module, int]:
-    """Create a ResNet backbone and return (backbone, feature_dim).
+    """Create a ResNet or ConvNeXt backbone and return (backbone, feature_dim).
 
     Args:
-        name: One of 'resnet18', 'resnet34', 'resnet50'.
+        name: One of 'convnext_tiny', 'resnet18', 'resnet34', 'resnet50'.
         pretrained: Whether to load ImageNet pretrained weights.
         in_channels: Number of input channels (1 for SAR, 3 for optical).
 
@@ -45,7 +45,35 @@ def _make_backbone(name: str, pretrained: bool, in_channels: int) -> tuple[nn.Mo
     """
     weights = "DEFAULT" if pretrained else None
 
-    if name == "resnet18":
+    if name == "convnext_tiny":
+        base = models.convnext_tiny(weights=weights)
+        feat_dim = 768
+
+        if in_channels != 3:
+            old_conv = base.features[0][0]  # Stem conv
+            new_conv = nn.Conv2d(
+                in_channels,
+                old_conv.out_channels,
+                kernel_size=old_conv.kernel_size,
+                stride=old_conv.stride,
+                padding=old_conv.padding,
+                bias=old_conv.bias is not None,
+            )
+            if pretrained:
+                with torch.no_grad():
+                    new_conv.weight[:] = old_conv.weight.mean(dim=1, keepdim=True)
+                    if old_conv.bias is not None:
+                        new_conv.bias[:] = old_conv.bias
+            base.features[0][0] = new_conv
+
+        backbone = nn.Sequential(
+            base.features,
+            base.avgpool,
+            nn.Flatten(),
+        )
+        return backbone, feat_dim
+
+    elif name == "resnet18":
         base = models.resnet18(weights=weights)
         feat_dim = 512
     elif name == "resnet34":
@@ -55,7 +83,7 @@ def _make_backbone(name: str, pretrained: bool, in_channels: int) -> tuple[nn.Mo
         base = models.resnet50(weights=weights)
         feat_dim = 2048
     else:
-        raise ValueError(f"Unsupported backbone: {name}. Use resnet18/34/50.")
+        raise ValueError(f"Unsupported backbone: {name}. Use convnext_tiny/resnet18/34/50.")
 
     # Modify first conv layer if input channels != 3
     if in_channels != 3:

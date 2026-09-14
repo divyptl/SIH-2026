@@ -55,52 +55,81 @@ class SiameseBackbone(nn.Module):
 
     Extracts features at multiple spatial resolutions (stages 1, 2, 3, 4)
     to support both dense spatial mask prediction and high-level VLM reasoning.
+
+    Supports both ResNet and ConvNeXt backbones.
     """
 
-    def __init__(self, backbone_name: str = "resnet18", pretrained: bool = True, in_channels: int = 3) -> None:
+    def __init__(self, backbone_name: str = "convnext_tiny", pretrained: bool = True, in_channels: int = 3) -> None:
         super().__init__()
         weights = "DEFAULT" if pretrained else None
+        self.backbone_type = "convnext" if "convnext" in backbone_name else "resnet"
 
-        if backbone_name == "resnet18":
-            base = models.resnet18(weights=weights)
-            self.dims = [64, 128, 256, 512]
-        elif backbone_name == "resnet34":
-            base = models.resnet34(weights=weights)
-            self.dims = [64, 128, 256, 512]
-        elif backbone_name == "resnet50":
-            base = models.resnet50(weights=weights)
-            self.dims = [256, 512, 1024, 2048]
-        else:
-            raise ValueError(f"Unsupported backbone: {backbone_name}. Choose resnet18/34/50.")
+        if backbone_name == "convnext_tiny":
+            base = models.convnext_tiny(weights=weights)
+            self.dims = [96, 192, 384, 768]
+            # ConvNeXt features.0 = stem (downsample 4x)
+            # features.1 = stage1, features.2 = downsample, features.3 = stage2, ...
+            # Group into 4 logical stages matching ResNet's stride pattern
+            self.stage1 = nn.Sequential(base.features[0], base.features[1])  # stem + stage1 (H/4)
+            self.stage2 = nn.Sequential(base.features[2], base.features[3])  # downsample + stage2 (H/8)
+            self.stage3 = nn.Sequential(base.features[4], base.features[5])  # downsample + stage3 (H/16)
+            self.stage4 = nn.Sequential(base.features[6], base.features[7])  # downsample + stage4 (H/32)
 
-        if in_channels != 3:
-            old_conv = base.conv1
-            base.conv1 = nn.Conv2d(
-                in_channels,
-                old_conv.out_channels,
-                kernel_size=old_conv.kernel_size,
-                stride=old_conv.stride,
-                padding=old_conv.padding,
-                bias=False,
+            # Handle non-3-channel input
+            if in_channels != 3:
+                old_conv = base.features[0][0]  # stem conv
+                new_conv = nn.Conv2d(
+                    in_channels,
+                    old_conv.out_channels,
+                    kernel_size=old_conv.kernel_size,
+                    stride=old_conv.stride,
+                    padding=old_conv.padding,
+                    bias=old_conv.bias is not None,
+                )
+                if pretrained:
+                    with torch.no_grad():
+                        new_conv.weight[:] = old_conv.weight.mean(dim=1, keepdim=True)
+                        if old_conv.bias is not None:
+                            new_conv.bias[:] = old_conv.bias
+                self.stage1[0][0] = new_conv
+
+        elif backbone_name in ("resnet18", "resnet34", "resnet50"):
+            if backbone_name == "resnet18":
+                base = models.resnet18(weights=weights)
+                self.dims = [64, 128, 256, 512]
+            elif backbone_name == "resnet34":
+                base = models.resnet34(weights=weights)
+                self.dims = [64, 128, 256, 512]
+            elif backbone_name == "resnet50":
+                base = models.resnet50(weights=weights)
+                self.dims = [256, 512, 1024, 2048]
+
+            if in_channels != 3:
+                old_conv = base.conv1
+                base.conv1 = nn.Conv2d(
+                    in_channels,
+                    old_conv.out_channels,
+                    kernel_size=old_conv.kernel_size,
+                    stride=old_conv.stride,
+                    padding=old_conv.padding,
+                    bias=False,
+                )
+                if pretrained:
+                    with torch.no_grad():
+                        base.conv1.weight[:] = old_conv.weight.mean(dim=1, keepdim=True)
+
+            # Stage 1: stem + layer1 (stride 4, H/4, W/4)
+            self.stage1 = nn.Sequential(
+                base.conv1, base.bn1, base.relu, base.maxpool, base.layer1,
             )
-            if pretrained:
-                with torch.no_grad():
-                    base.conv1.weight[:] = old_conv.weight.mean(dim=1, keepdim=True)
-
-        # Stage 1: stem + layer1 (stride 4, H/4, W/4)
-        self.stage1 = nn.Sequential(
-            base.conv1,
-            base.bn1,
-            base.relu,
-            base.maxpool,
-            base.layer1,
-        )
-        # Stage 2: layer2 (stride 8, H/8, W/8)
-        self.stage2 = base.layer2
-        # Stage 3: layer3 (stride 16, H/16, W/16)
-        self.stage3 = base.layer3
-        # Stage 4: layer4 (stride 32, H/32, W/32)
-        self.stage4 = base.layer4
+            # Stage 2: layer2 (stride 8, H/8, W/8)
+            self.stage2 = base.layer2
+            # Stage 3: layer3 (stride 16, H/16, W/16)
+            self.stage3 = base.layer3
+            # Stage 4: layer4 (stride 32, H/32, W/32)
+            self.stage4 = base.layer4
+        else:
+            raise ValueError(f"Unsupported backbone: {backbone_name}. Choose convnext_tiny/resnet18/34/50.")
 
     def forward_single(self, x: torch.Tensor) -> list[torch.Tensor]:
         """Extract multi-scale features for a single image."""
@@ -108,6 +137,7 @@ class SiameseBackbone(nn.Module):
         s2 = self.stage2(s1)
         s3 = self.stage3(s2)
         s4 = self.stage4(s3)
+        # ConvNeXt outputs (B, C, H, W) with channels-first — same as ResNet
         return [s1, s2, s3, s4]
 
     def forward(self, t1: torch.Tensor, t2: torch.Tensor) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
