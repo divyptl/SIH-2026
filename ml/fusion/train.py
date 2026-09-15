@@ -28,13 +28,14 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from ml.datasets.sen12 import SEN12Dataset
+from ml.datasets.qxs import QXSDataset
 from ml.fusion.config import ModelConfig, TrainConfig
 from ml.fusion.model import ContrastiveLoss, DualEncoder, TerrainClassifier
 from ml.fusion.transforms import PairedTransform, normalize_optical, normalize_sar
@@ -292,6 +293,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--backbone", type=str, default=None)
     parser.add_argument("--embed-dim", type=int, default=None)
+    parser.add_argument("--dataset", type=str, default=None, help="sen12 | qxs | both")
     parser.add_argument("--image-size", type=int, default=None)
     parser.add_argument("--data-root", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None)
@@ -311,6 +313,8 @@ def main() -> None:
         model_cfg.embed_dim = args.embed_dim
     if args.epochs:
         train_cfg.epochs = args.epochs
+    if args.dataset:
+        train_cfg.dataset = args.dataset
     if args.batch_size:
         train_cfg.batch_size = args.batch_size
     if args.lr:
@@ -353,20 +357,41 @@ def main() -> None:
     pair_transform_train = PairedTransform(size=train_cfg.image_size, augment=True)
     pair_transform_val = PairedTransform(size=train_cfg.image_size, augment=False)
 
-    train_ds = SEN12Dataset(
-        root=train_cfg.data_root,
-        terrains=train_cfg.terrains,
-        split="train",
-        pair_transform=pair_transform_train,
-        return_metadata=True,
-    )
-    val_ds = SEN12Dataset(
-        root=train_cfg.data_root,
-        terrains=train_cfg.terrains,
-        split="val",
-        pair_transform=pair_transform_val,
-        return_metadata=True,
-    )
+    train_datasets = []
+    val_datasets = []
+
+    if train_cfg.dataset in ("sen12", "both"):
+        train_datasets.append(SEN12Dataset(
+            root=train_cfg.data_root,
+            terrains=train_cfg.terrains,
+            split="train",
+            pair_transform=pair_transform_train,
+            return_metadata=True,
+        ))
+        val_datasets.append(SEN12Dataset(
+            root=train_cfg.data_root,
+            terrains=train_cfg.terrains,
+            split="val",
+            pair_transform=pair_transform_val,
+            return_metadata=True,
+        ))
+
+    if train_cfg.dataset in ("qxs", "both"):
+        train_datasets.append(QXSDataset(
+            root=train_cfg.qxs_root,
+            split="train",
+            pair_transform=pair_transform_train,
+            return_metadata=True,
+        ))
+        val_datasets.append(QXSDataset(
+            root=train_cfg.qxs_root,
+            split="val",
+            pair_transform=pair_transform_val,
+            return_metadata=True,
+        ))
+
+    train_ds = ConcatDataset(train_datasets) if len(train_datasets) > 1 else train_datasets[0]
+    val_ds = ConcatDataset(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
 
     print(f"  Train: {len(train_ds):,} pairs")
     print(f"  Val:   {len(val_ds):,} pairs")

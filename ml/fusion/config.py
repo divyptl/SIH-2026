@@ -33,7 +33,9 @@ class TrainConfig:
     """Training hyperparameters."""
 
     # Data
+    dataset: str = "both"               # sen12 | qxs | both
     data_root: str = "data/sen12/raw"
+    qxs_root: str = "data/QXSLAB_SAROPT/QXSLAB_SAROPT"
     terrains: list[str] = field(default_factory=lambda: ["agri", "barrenland", "grassland", "urban"])
     num_workers: int = 4
     pin_memory: bool = True
@@ -46,16 +48,16 @@ class TrainConfig:
     batch_size: int = 32
     epochs: int = 50
     lr: float = 2e-4
-    weight_decay: float = 1e-4
+    weight_decay: float = 1e-2
     warmup_epochs: int = 5
-    min_lr: float = 1e-6
+    min_lr: float = 1e-7
 
     # Terrain classification (multi-task)
     use_terrain_head: bool = True       # Train terrain classifier alongside contrastive
     terrain_loss_weight: float = 0.3    # Weight of terrain classification loss
 
     # Checkpointing
-    checkpoint_dir: str = "checkpoints/fusion"
+    checkpoint_dir: str = "checkpoints/fusion/v2"
     save_every: int = 1                 # Save checkpoint every N epochs
     resume_from: str | None = None      # Path to checkpoint to resume from
 

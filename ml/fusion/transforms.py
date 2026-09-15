@@ -88,10 +88,29 @@ class PairedTransform:
             sar = torch.rot90(sar, k, dims=[-2, -1])
             optical = torch.rot90(optical, k, dims=[-2, -1])
 
+        # Random affine (small rotation, translation, scale)
+        if random.random() > 0.5:
+            angle = random.uniform(-15.0, 15.0)
+            translate_x = int(random.uniform(-0.1, 0.1) * self.size)
+            translate_y = int(random.uniform(-0.1, 0.1) * self.size)
+            scale = random.uniform(0.9, 1.1)
+            
+            sar = TF.affine(sar, angle=angle, translate=[translate_x, translate_y], scale=scale, shear=0.0)
+            optical = TF.affine(optical, angle=angle, translate=[translate_x, translate_y], scale=scale, shear=0.0)
+
+        # Random Erasing (Cutout) - apply to both independently to force cross-modality reliance
+        if random.random() > 0.5:
+            # Erase 2% to 10% of the image area
+            i, j, h, w, v = T.RandomErasing.get_params(sar, scale=(0.02, 0.1), ratio=(0.3, 3.3), value=[0.0])
+            sar = TF.erase(sar, i, j, h, w, v)
+        if random.random() > 0.5:
+            i, j, h, w, v = T.RandomErasing.get_params(optical, scale=(0.02, 0.1), ratio=(0.3, 3.3), value=[0.0])
+            optical = TF.erase(optical, i, j, h, w, v)
+
         # --- Photometric augmentations (modality-specific) ---
 
         # Color jitter (optical only)
-        if random.random() > 0.3:
+        if random.random() > 0.1: # Increased probability from 0.7 to 0.9 (i.e. if rand > 0.1)
             optical = self.color_jitter(optical)
 
         # Gaussian noise (SAR only, simulates speckle)
