@@ -16,16 +16,22 @@ class ModelConfig:
     """Architecture hyperparameters."""
 
     # Backbone
-    backbone: str = "convnext_tiny"     # convnext_tiny | resnet18 | resnet34 | resnet50
+    backbone: str = "resnet50"          # convnext_tiny | resnet18 | resnet34 | resnet50
     pretrained: bool = True             # ImageNet pretrained backbone
 
     # Projection head
     embed_dim: int = 256                # Shared embedding dimensionality
     projection_hidden: int = 512        # Hidden layer in projection MLP
 
+    # Self-Attention Transformer
+    use_attention: bool = True           # Enable Self-Attention blocks after backbone
+    attn_dim: int = 512                  # Internal attention dimension (projected from backbone)
+    attn_heads: int = 8                  # Number of attention heads
+    attn_layers: int = 2                 # Number of Transformer encoder layers
+
     # Contrastive loss
     temperature: float = 0.07           # NT-Xent temperature (learnable if learn_temperature=True)
-    learn_temperature: bool = True      # Make temperature a learnable parameter
+    learn_temperature: bool = False     # Make temperature a learnable parameter
 
 
 @dataclass
@@ -37,7 +43,7 @@ class TrainConfig:
     data_root: str = "data/sen12/raw"
     qxs_root: str = "data/QXSLAB_SAROPT/QXSLAB_SAROPT"
     terrains: list[str] = field(default_factory=lambda: ["agri", "barrenland", "grassland", "urban"])
-    num_workers: int = 4
+    num_workers: int = 16
     pin_memory: bool = True
 
     # Image preprocessing
@@ -45,7 +51,7 @@ class TrainConfig:
     augment: bool = True                # Enable data augmentation
 
     # Optimization
-    batch_size: int = 32
+    batch_size: int = 512
     epochs: int = 50
     lr: float = 2e-4
     weight_decay: float = 1e-2
@@ -57,7 +63,7 @@ class TrainConfig:
     terrain_loss_weight: float = 0.3    # Weight of terrain classification loss
 
     # Checkpointing
-    checkpoint_dir: str = "checkpoints/fusion/v2"
+    checkpoint_dir: str = "checkpoints/fusion/v3"
     save_every: int = 1                 # Save checkpoint every N epochs
     resume_from: str | None = None      # Path to checkpoint to resume from
 

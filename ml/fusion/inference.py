@@ -92,21 +92,32 @@ class FusionModel:
         cfg = ckpt.get("model_config", {})
 
         model = DualEncoder(
-            backbone=cfg.get("backbone", "resnet18"),
+            backbone=cfg.get("backbone", "resnet50"),
             pretrained=False,
             embed_dim=cfg.get("embed_dim", 256),
             projection_hidden=cfg.get("projection_hidden", 512),
+            use_attention=cfg.get("use_attention", True),
+            attn_dim=cfg.get("attn_dim", 512),
+            attn_heads=cfg.get("attn_heads", 8),
+            attn_layers=cfg.get("attn_layers", 2),
         )
         model.load_state_dict(ckpt["model"])
 
         terrain_head = None
         if "terrain_head" in ckpt:
-            feat_dim = 512 if cfg.get("backbone", "resnet18") in ("resnet18", "resnet34") else 2048
+            backbone_name = cfg.get("backbone", "resnet50")
+            if backbone_name == "convnext_tiny":
+                feat_dim = 768
+            elif backbone_name in ("resnet18", "resnet34"):
+                feat_dim = 512
+            else:
+                feat_dim = 2048
             terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=4)
             terrain_head.load_state_dict(ckpt["terrain_head"])
 
         print(f"Loaded fusion model from {checkpoint_path}")
-        print(f"  Backbone: {cfg.get('backbone', 'resnet18')}, Embed dim: {cfg.get('embed_dim', 256)}")
+        print(f"  Backbone: {cfg.get('backbone', 'resnet50')}, Embed dim: {cfg.get('embed_dim', 256)}")
+        print(f"  Attention: {cfg.get('use_attention', True)} (dim={cfg.get('attn_dim', 512)}, heads={cfg.get('attn_heads', 8)}, layers={cfg.get('attn_layers', 2)})")
         if "epoch" in ckpt:
             print(f"  Trained for {ckpt['epoch']} epochs")
 

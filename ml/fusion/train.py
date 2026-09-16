@@ -80,7 +80,7 @@ def train_one_epoch(
     model: DualEncoder,
     loss_fn: ContrastiveLoss,
     terrain_head: TerrainClassifier | None,
-    train_loader: DataLoader,
+    train_loaders: list[DataLoader],
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     scaler: torch.amp.GradScaler | None,
@@ -103,34 +103,63 @@ def train_one_epoch(
     total_terrain_acc = 0.0
     num_batches = 0
 
-    for step, (sar, optical, terrain_labels) in enumerate(train_loader):
-        sar = normalize_sar(sar.to(device))
-        optical = normalize_optical(optical.to(device))
-        terrain_labels = terrain_labels.to(device)
-
-        # Forward: get embeddings
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            sar_emb, opt_emb = model(sar, optical)
-
-            # Contrastive loss
-            contrastive_loss, contrastive_metrics = loss_fn(sar_emb, opt_emb)
-            loss = contrastive_loss
-
-            # Terrain classification (multi-task)
-            terrain_loss_val = 0.0
-            terrain_acc_val = 0.0
-            if terrain_head is not None:
-                sar_feat, opt_feat = model.get_backbone_features()
-                terrain_logits = terrain_head(sar_feat.detach(), opt_feat.detach())
-                terrain_loss = nn.functional.cross_entropy(terrain_logits, terrain_labels)
-                loss = loss + cfg.terrain_loss_weight * terrain_loss
-                terrain_loss_val = terrain_loss.item()
-                terrain_acc_val = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
-
-        # Backward
+    for step, batches in enumerate(zip(*train_loaders)):
+        loss = torch.tensor(0.0, device=device)
+        step_contrastive = 0.0
+        step_terrain = 0.0
+        step_s2o = 0.0
+        step_o2s = 0.0
+        step_terrain_acc = 0.0
+        last_temp = 0.0
+        
+        num_domains = len(batches)
         optimizer.zero_grad()
+
+        for sar, optical, terrain_labels in batches:
+            sar = normalize_sar(sar.to(device))
+            optical = normalize_optical(optical.to(device))
+            terrain_labels = terrain_labels.to(device)
+
+            # Forward: get embeddings
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                sar_emb, opt_emb = model(sar, optical)
+
+                # Contrastive loss (in-domain only)
+                contrastive_loss, contrastive_metrics = loss_fn(sar_emb, opt_emb)
+                domain_loss = contrastive_loss
+
+                # Terrain classification (multi-task)
+                domain_terrain_loss = 0.0
+                domain_terrain_acc = 0.0
+                if terrain_head is not None:
+                    sar_feat, opt_feat = model.get_backbone_features()
+                    terrain_logits = terrain_head(sar_feat.detach(), opt_feat.detach())
+                    terrain_loss = nn.functional.cross_entropy(terrain_logits, terrain_labels)
+                    domain_loss = domain_loss + cfg.terrain_loss_weight * terrain_loss
+                    domain_terrain_loss = terrain_loss.item()
+                    domain_terrain_acc = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
+
+                # Scale the loss to average gradients across domains
+                domain_loss = domain_loss / num_domains
+                
+            # Backward IMMEDIATELY to free the graph and VRAM
+            if scaler is not None:
+                scaler.scale(domain_loss).backward()
+            else:
+                domain_loss.backward()
+                
+            loss = loss + domain_loss.detach()
+
+            # Accumulate metrics across domains for logging
+            step_contrastive += contrastive_metrics["loss"]
+            step_terrain += domain_terrain_loss
+            step_s2o += contrastive_metrics["sar2opt_acc"]
+            step_o2s += contrastive_metrics["opt2sar_acc"]
+            step_terrain_acc += domain_terrain_acc
+            last_temp = contrastive_metrics["temperature"]
+
+        # Step optimizer
         if scaler is not None:
-            scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             if terrain_head is not None:
@@ -138,7 +167,6 @@ def train_one_epoch(
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             if terrain_head is not None:
                 torch.nn.utils.clip_grad_norm_(terrain_head.parameters(), max_norm=1.0)
@@ -148,24 +176,25 @@ def train_one_epoch(
 
         # Accumulate metrics
         total_loss += loss.item()
-        total_contrastive += contrastive_metrics["loss"]
-        total_terrain += terrain_loss_val
-        total_s2o_acc += contrastive_metrics["sar2opt_acc"]
-        total_o2s_acc += contrastive_metrics["opt2sar_acc"]
-        total_terrain_acc += terrain_acc_val
+        total_contrastive += step_contrastive / num_domains
+        total_terrain += step_terrain / num_domains
+        total_s2o_acc += step_s2o / num_domains
+        total_o2s_acc += step_o2s / num_domains
+        total_terrain_acc += step_terrain_acc / num_domains
         num_batches += 1
 
         # Logging
         if (step + 1) % cfg.log_every == 0:
             lr = optimizer.param_groups[0]["lr"]
+            num_steps = min(len(dl) for dl in train_loaders)
             print(
-                f"  [{epoch}][{step+1}/{len(train_loader)}] "
+                f"  [{epoch}][{step+1}/{num_steps}] "
                 f"loss={loss.item():.4f}  "
-                f"contra={contrastive_metrics['loss']:.4f}  "
-                f"s2o_acc={contrastive_metrics['sar2opt_acc']:.1%}  "
-                f"o2s_acc={contrastive_metrics['opt2sar_acc']:.1%}  "
-                f"terrain_acc={terrain_acc_val:.1%}  "
-                f"temp={contrastive_metrics['temperature']:.4f}  "
+                f"contra={step_contrastive/num_domains:.4f}  "
+                f"s2o_acc={step_s2o/num_domains:.1%}  "
+                f"o2s_acc={step_o2s/num_domains:.1%}  "
+                f"terrain_acc={step_terrain_acc/num_domains:.1%}  "
+                f"temp={last_temp:.4f}  "
                 f"lr={lr:.2e}"
             )
 
@@ -184,7 +213,7 @@ def evaluate(
     model: DualEncoder,
     loss_fn: ContrastiveLoss,
     terrain_head: TerrainClassifier | None,
-    val_loader: DataLoader,
+    val_loaders: list[DataLoader],
     device: str,
     use_amp: bool = False,
 ) -> dict[str, float]:
@@ -200,26 +229,27 @@ def evaluate(
     total_terrain_acc = 0.0
     num_batches = 0
 
-    for sar, optical, terrain_labels in val_loader:
-        sar = normalize_sar(sar.to(device))
-        optical = normalize_optical(optical.to(device))
-        terrain_labels = terrain_labels.to(device)
+    for val_loader in val_loaders:
+        for sar, optical, terrain_labels in val_loader:
+            sar = normalize_sar(sar.to(device))
+            optical = normalize_optical(optical.to(device))
+            terrain_labels = terrain_labels.to(device)
 
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            sar_emb, opt_emb = model(sar, optical)
-            _, metrics = loss_fn(sar_emb, opt_emb)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                sar_emb, opt_emb = model(sar, optical)
+                _, metrics = loss_fn(sar_emb, opt_emb)
 
-            terrain_acc = 0.0
-            if terrain_head is not None:
-                sar_feat, opt_feat = model.get_backbone_features()
-                terrain_logits = terrain_head(sar_feat, opt_feat)
-                terrain_acc = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
+                terrain_acc = 0.0
+                if terrain_head is not None:
+                    sar_feat, opt_feat = model.get_backbone_features()
+                    terrain_logits = terrain_head(sar_feat, opt_feat)
+                    terrain_acc = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
 
-        total_loss += metrics["loss"]
-        total_s2o_acc += metrics["sar2opt_acc"]
-        total_o2s_acc += metrics["opt2sar_acc"]
-        total_terrain_acc += terrain_acc
-        num_batches += 1
+            total_loss += metrics["loss"]
+            total_s2o_acc += metrics["sar2opt_acc"]
+            total_o2s_acc += metrics["opt2sar_acc"]
+            total_terrain_acc += terrain_acc
+            num_batches += 1
 
     return {
         "val_loss": total_loss / max(num_batches, 1),
@@ -390,29 +420,33 @@ def main() -> None:
             return_metadata=True,
         ))
 
-    train_ds = ConcatDataset(train_datasets) if len(train_datasets) > 1 else train_datasets[0]
-    val_ds = ConcatDataset(val_datasets) if len(val_datasets) > 1 else val_datasets[0]
+    train_loaders = [
+        DataLoader(
+            ds,
+            batch_size=train_cfg.batch_size,
+            shuffle=True,
+            num_workers=train_cfg.num_workers,
+            pin_memory=train_cfg.pin_memory,
+            collate_fn=collate_with_terrain,
+            drop_last=True,
+        ) for ds in train_datasets
+    ]
+    
+    val_loaders = [
+        DataLoader(
+            ds,
+            batch_size=train_cfg.batch_size,
+            shuffle=False,
+            num_workers=train_cfg.num_workers,
+            pin_memory=train_cfg.pin_memory,
+            collate_fn=collate_with_terrain,
+        ) for ds in val_datasets
+    ]
 
-    print(f"  Train: {len(train_ds):,} pairs")
-    print(f"  Val:   {len(val_ds):,} pairs")
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=train_cfg.batch_size,
-        shuffle=True,
-        num_workers=train_cfg.num_workers,
-        pin_memory=train_cfg.pin_memory,
-        collate_fn=collate_with_terrain,
-        drop_last=True,  # Required for contrastive loss (need full batches)
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=train_cfg.batch_size,
-        shuffle=False,
-        num_workers=train_cfg.num_workers,
-        pin_memory=train_cfg.pin_memory,
-        collate_fn=collate_with_terrain,
-    )
+    total_train_pairs = sum(len(ds) for ds in train_datasets)
+    total_val_pairs = sum(len(ds) for ds in val_datasets)
+    print(f"  Train: {total_train_pairs:,} pairs across {len(train_datasets)} dataset(s)")
+    print(f"  Val:   {total_val_pairs:,} pairs across {len(val_datasets)} dataset(s)")
 
     # ── Model ──
     print("\nBuilding model...")
@@ -421,6 +455,10 @@ def main() -> None:
         pretrained=model_cfg.pretrained,
         embed_dim=model_cfg.embed_dim,
         projection_hidden=model_cfg.projection_hidden,
+        use_attention=model_cfg.use_attention,
+        attn_dim=model_cfg.attn_dim,
+        attn_heads=model_cfg.attn_heads,
+        attn_layers=model_cfg.attn_layers,
     ).to(device)
 
     loss_fn = ContrastiveLoss(
@@ -454,7 +492,7 @@ def main() -> None:
         weight_decay=train_cfg.weight_decay,
     )
 
-    steps_per_epoch = len(train_loader)
+    steps_per_epoch = min(len(dl) for dl in train_loaders)
     scheduler = get_cosine_schedule(
         optimizer,
         train_cfg.warmup_epochs,
@@ -485,14 +523,14 @@ def main() -> None:
 
         # Train
         train_metrics = train_one_epoch(
-            model, loss_fn, terrain_head, train_loader,
+            model, loss_fn, terrain_head, train_loaders,
             optimizer, scheduler, scaler, use_amp, device, epoch, train_cfg,
         )
 
         # Evaluate
         val_metrics = {}
         if epoch % train_cfg.eval_every == 0:
-            val_metrics = evaluate(model, loss_fn, terrain_head, val_loader, device, use_amp)
+            val_metrics = evaluate(model, loss_fn, terrain_head, val_loaders, device, use_amp)
 
         elapsed = time.time() - t0
         all_metrics = {**train_metrics, **val_metrics, "epoch": epoch, "time": elapsed}

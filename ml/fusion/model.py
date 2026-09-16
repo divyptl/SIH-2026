@@ -1,20 +1,26 @@
 """
 Dual-Encoder model for Optical-SAR contrastive alignment.
 
-Architecture:
-    ┌─────────────┐     ┌────────────────────┐      ┌───────────┐
-    │ SAR image   │-->  │  SAR Encoder       │ -->  │           │
-    │ (1, H, W)   │     │  (ResNet backbone) │      │ Shared    │
-    └─────────────┘     │  + Projection MLP  │      │ Embedding │ --> Contrastive Loss
-    ┌─────────────┐     ├────────────────────┤      │ Space     │
-    │ Optical img │-->  │  Optical Encoder   │ -->  │ (256-dim) │
-    │ (3, H, W)   │     │  (ResNet backbone) │      │           │
-    └─────────────┘     │  + Projection MLP  │      └───────────┘
-                        └────────────────────┘
+Architecture (v3 — Hybrid ResNet + Self-Attention Transformer):
 
-The SAR and optical encoders share the same architecture but have separate
-weights. Each encoder consists of a ResNet backbone followed by a 2-layer
-projection MLP that maps features into a shared embedding space.
+    ┌─────────────┐   ┌──────────────┐   ┌──────────────────┐   ┌──────────────┐   ┌───────────┐
+    │ SAR image   │─> │ ResNet-50    │─> │ Self-Attention   │─> │ GAP + Proj   │─> │           │
+    │ (1, H, W)   │   │ Backbone     │   │ Transformer      │   │ MLP          │   │ Shared    │
+    └─────────────┘   │ (spatial)    │   │ (2 layers)       │   └──────────────┘   │ Embedding │─> NT-Xent
+    ┌─────────────┐   ├──────────────┤   ├──────────────────┤   ┌──────────────┐   │ Space     │   Loss
+    │ Optical img │─> │ ResNet-50    │─> │ Self-Attention   │─> │ GAP + Proj   │─> │ (256-dim) │
+    │ (3, H, W)   │   │ Backbone     │   │ Transformer      │   │ MLP          │   │           │
+    └─────────────┘   │ (spatial)    │   │ (2 layers)       │   └──────────────┘   └───────────┘
+                      └──────────────┘   └──────────────────┘
+
+The SAR and optical branches are completely independent (NO cross-attention)
+to preserve the strict isolation required by contrastive learning.
+
+Each branch: ResNet backbone extracts a 7×7 spatial feature grid, which is
+flattened into 49 "tokens". A Self-Attention Transformer allows each token
+to attend to all other tokens, building a global understanding of the image's
+spatial geometry. The attended tokens are then pooled and projected into the
+shared embedding space via a 2-layer MLP.
 
 The NT-Xent contrastive loss pulls matching SAR-optical pairs together and
 pushes non-matching pairs apart in the embedding space.
@@ -33,7 +39,10 @@ from torchvision import models
 # ── Backbone factory ────────────────────────────────────────────────────
 
 def _make_backbone(name: str, pretrained: bool, in_channels: int) -> tuple[nn.Module, int]:
-    """Create a ResNet or ConvNeXt backbone and return (backbone, feature_dim).
+    """Create a backbone that outputs SPATIAL feature maps (B, C, H, W).
+
+    Unlike v2, this does NOT include avgpool or flatten — we need the
+    spatial grid for the Self-Attention Transformer.
 
     Args:
         name: One of 'convnext_tiny', 'resnet18', 'resnet34', 'resnet50'.
@@ -41,7 +50,8 @@ def _make_backbone(name: str, pretrained: bool, in_channels: int) -> tuple[nn.Mo
         in_channels: Number of input channels (1 for SAR, 3 for optical).
 
     Returns:
-        Tuple of (backbone_without_fc, output_feature_dim).
+        Tuple of (backbone, output_feature_dim).
+        backbone outputs (B, feature_dim, H, W) spatial feature maps.
     """
     weights = "DEFAULT" if pretrained else None
 
@@ -66,11 +76,9 @@ def _make_backbone(name: str, pretrained: bool, in_channels: int) -> tuple[nn.Mo
                         new_conv.bias[:] = old_conv.bias
             base.features[0][0] = new_conv
 
-        backbone = nn.Sequential(
-            base.features,
-            base.avgpool,
-            nn.Flatten(),
-        )
+        # Return feature extractor only (no avgpool/flatten)
+        # Output: (B, 768, 7, 7) for 224×224 input
+        backbone = base.features
         return backbone, feat_dim
 
     elif name == "resnet18":
@@ -101,15 +109,111 @@ def _make_backbone(name: str, pretrained: bool, in_channels: int) -> tuple[nn.Mo
             with torch.no_grad():
                 base.conv1.weight[:] = old_conv.weight.mean(dim=1, keepdim=True)
 
-    # Remove the final FC layer — we want feature vectors, not class logits
+    # Return SPATIAL feature maps (no avgpool, no flatten)
+    # Output: (B, feat_dim, 7, 7) for 224×224 input
     backbone = nn.Sequential(
         base.conv1, base.bn1, base.relu, base.maxpool,
         base.layer1, base.layer2, base.layer3, base.layer4,
-        base.avgpool,
-        nn.Flatten(),
     )
 
     return backbone, feat_dim
+
+
+# ── Self-Attention Transformer Block ────────────────────────────────────
+
+class SelfAttentionBlock(nn.Module):
+    """Lightweight Self-Attention Transformer for spatial feature refinement.
+
+    Takes a spatial feature map (B, C, H, W), flattens it into a sequence
+    of H*W tokens, runs multi-head self-attention with learned positional
+    embeddings, and returns the refined spatial feature map.
+
+    Uses a linear projection to reduce the channel dimension before attention
+    for VRAM efficiency (e.g., 2048 → 512), then projects back. A residual
+    connection ensures the backbone features are preserved.
+
+    Args:
+        feat_dim: Input feature channel dimension from the backbone.
+        attn_dim: Internal attention dimension (projected from feat_dim).
+        num_heads: Number of attention heads.
+        num_layers: Number of Transformer encoder layers.
+        dropout: Dropout rate inside the Transformer.
+        spatial_size: Expected spatial size of input (7 for 224×224 input).
+    """
+
+    def __init__(
+        self,
+        feat_dim: int,
+        attn_dim: int = 512,
+        num_heads: int = 8,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+        spatial_size: int = 7,
+    ) -> None:
+        super().__init__()
+        self.feat_dim = feat_dim
+        self.attn_dim = attn_dim
+
+        # Project from backbone channels to attention dimension
+        self.proj_in = nn.Linear(feat_dim, attn_dim)
+
+        # Learnable positional embeddings for the spatial grid
+        num_tokens = spatial_size * spatial_size  # 49 for 7×7
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, num_tokens, attn_dim) * 0.02
+        )
+
+        # Standard Transformer Encoder with Pre-Norm (more stable training)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=attn_dim,
+            nhead=num_heads,
+            dim_feedforward=attn_dim * 4,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,  # Pre-norm architecture (GPT-style, more stable)
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers
+        )
+
+        self.norm = nn.LayerNorm(attn_dim)
+
+        # Project back to original backbone dimension
+        self.proj_out = nn.Linear(attn_dim, feat_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Refine spatial features via self-attention with a residual connection.
+
+        Args:
+            x: Spatial feature map (B, C, H, W) from the backbone.
+
+        Returns:
+            Refined feature map (B, C, H, W) = input + attention output.
+        """
+        B, C, H, W = x.shape
+
+        # Flatten spatial dims to token sequence: (B, H*W, C)
+        tokens = x.flatten(2).transpose(1, 2)
+
+        # Project down for VRAM-efficient attention: (B, H*W, attn_dim)
+        tokens_proj = self.proj_in(tokens)
+
+        # Add positional embeddings
+        tokens_proj = tokens_proj + self.pos_embed[:, : H * W, :]
+
+        # Self-Attention (each SAR/optical token attends to its own tokens)
+        tokens_proj = self.transformer(tokens_proj)
+        tokens_proj = self.norm(tokens_proj)
+
+        # Project back to original backbone dimension: (B, H*W, C)
+        tokens_out = self.proj_out(tokens_proj)
+
+        # Reshape back to spatial: (B, C, H, W)
+        out = tokens_out.transpose(1, 2).view(B, C, H, W)
+
+        # Residual connection preserves backbone features
+        return x + out
 
 
 # ── Projection Head ─────────────────────────────────────────────────────
@@ -137,34 +241,61 @@ class ProjectionHead(nn.Module):
 # ── Dual Encoder ─────────────────────────────────────────────────────────
 
 class DualEncoder(nn.Module):
-    """CLIP-style dual encoder for SAR-optical cross-modal alignment.
+    """Hybrid ResNet + Self-Attention dual encoder for SAR-optical alignment.
 
     Encodes SAR images (1-channel) and optical images (3-channel) into a
     shared embedding space where matching pairs are close and non-matching
     pairs are far apart.
+
+    The architecture passes spatial feature maps from the ResNet backbone
+    through independent Self-Attention Transformer blocks before pooling
+    and projecting into the shared embedding space.
 
     Args:
         backbone: ResNet variant name ('resnet18', 'resnet34', 'resnet50').
         pretrained: Use ImageNet pretrained weights for initialization.
         embed_dim: Dimensionality of the shared embedding space.
         projection_hidden: Hidden layer size in the projection MLP.
+        use_attention: Whether to use Self-Attention Transformer blocks.
+        attn_dim: Internal attention dimension (projected from backbone channels).
+        attn_heads: Number of attention heads.
+        attn_layers: Number of Transformer encoder layers.
     """
 
     def __init__(
         self,
-        backbone: str = "resnet18",
+        backbone: str = "resnet50",
         pretrained: bool = True,
         embed_dim: int = 256,
         projection_hidden: int = 512,
+        use_attention: bool = True,
+        attn_dim: int = 512,
+        attn_heads: int = 8,
+        attn_layers: int = 2,
     ) -> None:
         super().__init__()
+        self.use_attention = use_attention
 
         # SAR encoder (1-channel input)
         self.sar_backbone, sar_feat_dim = _make_backbone(backbone, pretrained, in_channels=1)
-        self.sar_projector = ProjectionHead(sar_feat_dim, projection_hidden, embed_dim)
 
         # Optical encoder (3-channel input)
         self.opt_backbone, opt_feat_dim = _make_backbone(backbone, pretrained, in_channels=3)
+
+        # Self-Attention blocks (independent per modality — NO cross-attention)
+        if use_attention:
+            self.sar_attention = SelfAttentionBlock(
+                sar_feat_dim, attn_dim, attn_heads, attn_layers,
+            )
+            self.opt_attention = SelfAttentionBlock(
+                opt_feat_dim, attn_dim, attn_heads, attn_layers,
+            )
+
+        # Global Average Pooling (replaces the avgpool removed from backbone)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+
+        # Projection heads
+        self.sar_projector = ProjectionHead(sar_feat_dim, projection_hidden, embed_dim)
         self.opt_projector = ProjectionHead(opt_feat_dim, projection_hidden, embed_dim)
 
         # Cached backbone features (populated during forward(), used by get_backbone_features())
@@ -173,13 +304,19 @@ class DualEncoder(nn.Module):
 
     def encode_sar(self, x: torch.Tensor) -> torch.Tensor:
         """Encode SAR images to embeddings. Input: (B, 1, H, W) -> (B, embed_dim)."""
-        features = self.sar_backbone(x)
+        feat_map = self.sar_backbone(x)              # (B, C, 7, 7)
+        if self.use_attention:
+            feat_map = self.sar_attention(feat_map)   # (B, C, 7, 7) — spatially refined
+        features = self.pool(feat_map).flatten(1)     # (B, C)
         self._cached_sar_feat = features
         return self.sar_projector(features)
 
     def encode_optical(self, x: torch.Tensor) -> torch.Tensor:
         """Encode optical images to embeddings. Input: (B, 3, H, W) -> (B, embed_dim)."""
-        features = self.opt_backbone(x)
+        feat_map = self.opt_backbone(x)               # (B, C, 7, 7)
+        if self.use_attention:
+            feat_map = self.opt_attention(feat_map)    # (B, C, 7, 7) — spatially refined
+        features = self.pool(feat_map).flatten(1)      # (B, C)
         self._cached_opt_feat = features
         return self.opt_projector(features)
 
@@ -199,18 +336,24 @@ class DualEncoder(nn.Module):
         sar: torch.Tensor | None = None,
         optical: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Get raw backbone features before projection (for downstream tasks).
+        """Get pooled backbone features after attention (for downstream tasks).
 
         If forward() was called first, returns the cached features (no extra
-        compute). Otherwise falls back to running the backbones directly.
+        compute). Otherwise falls back to running the full pipeline directly.
         """
         sar_feat = self._cached_sar_feat
         opt_feat = self._cached_opt_feat
 
         if sar_feat is None and sar is not None:
-            sar_feat = self.sar_backbone(sar)
+            feat_map = self.sar_backbone(sar)
+            if self.use_attention:
+                feat_map = self.sar_attention(feat_map)
+            sar_feat = self.pool(feat_map).flatten(1)
         if opt_feat is None and optical is not None:
-            opt_feat = self.opt_backbone(optical)
+            feat_map = self.opt_backbone(optical)
+            if self.use_attention:
+                feat_map = self.opt_attention(feat_map)
+            opt_feat = self.pool(feat_map).flatten(1)
 
         if sar_feat is None or opt_feat is None:
             raise RuntimeError(
@@ -332,21 +475,29 @@ class TerrainClassifier(nn.Module):
 # ── Quick test ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Testing DualEncoder...")
+    print("Testing Hybrid DualEncoder (ResNet-50 + Self-Attention)...\n")
 
-    model = DualEncoder(backbone="resnet18", pretrained=False, embed_dim=256)
-    loss_fn = ContrastiveLoss(temperature=0.07)
-    terrain_head = TerrainClassifier(feature_dim=512, num_classes=4)
+    model = DualEncoder(
+        backbone="resnet50",
+        pretrained=False,
+        embed_dim=256,
+        use_attention=True,
+        attn_dim=512,
+        attn_heads=8,
+        attn_layers=2,
+    )
+    loss_fn = ContrastiveLoss(temperature=0.07, learn_temperature=False)
+    terrain_head = TerrainClassifier(feature_dim=2048, num_classes=4)
 
     # Fake batch
-    batch_size = 8
+    batch_size = 4
     sar = torch.randn(batch_size, 1, 224, 224)
     optical = torch.randn(batch_size, 3, 224, 224)
 
     # Forward pass
     sar_emb, opt_emb = model(sar, optical)
-    print(f"SAR embeddings:     {sar_emb.shape}")   # (8, 256)
-    print(f"Optical embeddings: {opt_emb.shape}")    # (8, 256)
+    print(f"SAR embeddings:     {sar_emb.shape}")   # (4, 256)
+    print(f"Optical embeddings: {opt_emb.shape}")    # (4, 256)
 
     # Contrastive loss
     loss, metrics = loss_fn(sar_emb, opt_emb)
@@ -357,9 +508,19 @@ if __name__ == "__main__":
 
     # Terrain classification
     sar_feat, opt_feat = model.get_backbone_features(sar, optical)
+    print(f"Backbone SAR features:     {sar_feat.shape}")   # (4, 2048)
+    print(f"Backbone Optical features: {opt_feat.shape}")   # (4, 2048)
     terrain_logits = terrain_head(sar_feat, opt_feat)
-    print(f"Terrain logits: {terrain_logits.shape}")  # (8, 4)
+    print(f"Terrain logits: {terrain_logits.shape}")  # (4, 4)
 
     total_params = sum(p.numel() for p in model.parameters()) / 1e6
-    print(f"\nTotal model params: {total_params:.1f}M")
-    print("All tests passed.")
+    attn_params = 0
+    if model.use_attention:
+        attn_params += sum(p.numel() for p in model.sar_attention.parameters()) / 1e6
+        attn_params += sum(p.numel() for p in model.opt_attention.parameters()) / 1e6
+    backbone_params = total_params - attn_params
+
+    print(f"\nBackbone params:   {backbone_params:.1f}M")
+    print(f"Attention params:  {attn_params:.1f}M")
+    print(f"Total model params: {total_params:.1f}M")
+    print("\nAll tests passed!")

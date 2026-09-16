@@ -88,15 +88,6 @@ class PairedTransform:
             sar = torch.rot90(sar, k, dims=[-2, -1])
             optical = torch.rot90(optical, k, dims=[-2, -1])
 
-        # Random affine (small rotation, translation, scale)
-        if random.random() > 0.5:
-            angle = random.uniform(-15.0, 15.0)
-            translate_x = int(random.uniform(-0.1, 0.1) * self.size)
-            translate_y = int(random.uniform(-0.1, 0.1) * self.size)
-            scale = random.uniform(0.9, 1.1)
-            
-            sar = TF.affine(sar, angle=angle, translate=[translate_x, translate_y], scale=scale, shear=0.0)
-            optical = TF.affine(optical, angle=angle, translate=[translate_x, translate_y], scale=scale, shear=0.0)
 
         # Random Erasing (Cutout) - apply to both independently to force cross-modality reliance
         if random.random() > 0.5:
