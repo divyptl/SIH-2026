@@ -11,6 +11,8 @@ Operates strictly on real-world remote sensing datasets:
 from __future__ import annotations
 
 import json
+import zlib
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +25,9 @@ from torch.utils.data import Dataset
 
 from ml.C_VQA.model import CANONICAL_ANSWERS, SimpleTokenizer
 from ml.C_VQA.transforms import PairedBitemporalTransform
+
+# Target index for answers outside the answer vocabulary; CrossEntropyLoss skips it.
+IGNORE_INDEX = -100
 
 
 def load_real_satellite_image(path: Path | str) -> Image.Image | np.ndarray:
@@ -91,6 +96,12 @@ class CDVQADataset(Dataset):
         split: 'train', 'val', or 'test'.
         transform: PairedBitemporalTransform instance.
         max_question_length: Max token length for query questions.
+        question_vocab: Tokenizer vocabulary. Built from this split's questions
+            when None — pass the train split's vocab to val/test datasets.
+        answer_vocab: Answer classes. Built from this split's answers when
+            None — pass the train split's vocab to val/test datasets.
+        val_fraction: Share of image pairs held out for val/test when the
+            annotations carry no split information.
     """
 
     def __init__(
@@ -100,11 +111,14 @@ class CDVQADataset(Dataset):
         transform: Callable | None = None,
         max_question_length: int = 32,
         auto_generate: bool = False,
+        question_vocab: list[str] | None = None,
+        answer_vocab: list[str] | None = None,
+        val_fraction: float = 0.1,
     ) -> None:
         self.root = Path(root)
         self.split = split
         self.max_question_length = max_question_length
-        self.tokenizer = SimpleTokenizer()
+        self.val_fraction = val_fraction
 
         if transform is None:
             self.transform = PairedBitemporalTransform(
@@ -114,13 +128,52 @@ class CDVQADataset(Dataset):
         else:
             self.transform = transform
 
-        # Build vocabulary mapping for answers
-        self.answer_to_idx = {ans.lower(): i for i, ans in enumerate(CANONICAL_ANSWERS)}
-        self.idx_to_answer = {i: ans for i, ans in enumerate(CANONICAL_ANSWERS)}
-
         # Load samples strictly from real dataset
         self.samples: list[dict[str, Any]] = []
         self._load_dataset()
+
+        # The built-in tokenizer vocab covers ~70 words, so most dataset
+        # questions would collapse to <unk> and become indistinguishable.
+        self.question_vocab = question_vocab or self._build_question_vocab()
+        self.tokenizer = SimpleTokenizer(self.question_vocab)
+
+        # Answers outside CANONICAL_ANSWERS used to silently map to index 0
+        # ("unchanged"), turning every such sample into label noise.
+        self.answer_vocab = answer_vocab or self._build_answer_vocab()
+        self.answer_to_idx = {ans: i for i, ans in enumerate(self.answer_vocab)}
+        self.idx_to_answer = dict(enumerate(self.answer_vocab))
+
+        unknown = sum(1 for s in self.samples if self._normalize_answer(s) not in self.answer_to_idx)
+        if unknown:
+            print(
+                f"[CDVQADataset] Warning: {unknown}/{len(self.samples)} '{split}' answers are not in the "
+                f"answer vocabulary; they are excluded from the VQA loss."
+            )
+
+    @staticmethod
+    def _normalize_answer(sample: dict[str, Any]) -> str:
+        return str(sample.get("answer", "unchanged")).lower().strip()
+
+    def _build_question_vocab(self) -> list[str]:
+        # Built-in vocab first so <pad> stays at index 0 (the embedding padding_idx)
+        base = SimpleTokenizer()
+        counts = Counter(
+            token
+            for s in self.samples
+            for token in base.tokenize(s.get("question", ""))
+        )
+        vocab = list(base.vocab)
+        known = set(vocab)
+        vocab.extend(tok for tok, _ in counts.most_common() if tok not in known)
+        return vocab
+
+    def _build_answer_vocab(self) -> list[str]:
+        # Canonical answers keep their original indices; dataset answers follow.
+        vocab = [ans.lower() for ans in CANONICAL_ANSWERS]
+        known = set(vocab)
+        counts = Counter(self._normalize_answer(s) for s in self.samples)
+        vocab.extend(ans for ans, _ in counts.most_common() if ans not in known)
+        return vocab
 
     def _load_dataset(self) -> None:
         """Load real annotations JSON or fail with descriptive error if missing."""
@@ -152,9 +205,23 @@ class CDVQADataset(Dataset):
             else:
                 raw_samples = []
 
+            # A single annotations file with no per-sample split would otherwise
+            # load the full set for every split, making val identical to train
+            # and hiding overfitting. Hold out image pairs deterministically.
+            holdout = target_file == general_annotation_file and not any(
+                isinstance(s, dict) and "split" in s for s in raw_samples
+            )
+            if holdout:
+                print(
+                    f"[CDVQADataset] '{target_file.name}' has no split field; holding out "
+                    f"{self.val_fraction:.0%} of image pairs for val/test."
+                )
+
             # Filter split if annotated and unpack multi-question items
             for s in raw_samples:
                 if "split" in s and s["split"] != self.split:
+                    continue
+                if holdout and self._is_holdout(s) != (self.split != "train"):
                     continue
 
                 # Support multi-question real benchmark format
@@ -177,6 +244,15 @@ class CDVQADataset(Dataset):
                 f"[CDVQADataset] Found annotation file '{target_file}' but 0 samples for split '{self.split}'. "
                 f"Please verify your real dataset annotations."
             )
+
+    def _is_holdout(self, raw_sample: dict[str, Any]) -> bool:
+        """Assign an image pair to the held-out split by hashing its T1 path.
+
+        Hashing the pair (not the question) keeps every question about one
+        image pair on the same side of the split.
+        """
+        key = str(raw_sample.get("image_t1") or raw_sample.get("img_t1") or raw_sample.get("t1") or raw_sample.get("id", ""))
+        return zlib.crc32(key.encode("utf-8")) % 1000 < self.val_fraction * 1000
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -223,8 +299,8 @@ class CDVQADataset(Dataset):
         q_ids, q_mask = self.tokenizer.encode(question, max_length=self.max_question_length)
 
         # 5. Encode answer target
-        raw_answer = str(sample_info.get("answer", "unchanged")).lower().strip()
-        ans_idx = self.answer_to_idx.get(raw_answer, 0)
+        raw_answer = self._normalize_answer(sample_info)
+        ans_idx = self.answer_to_idx.get(raw_answer, IGNORE_INDEX)
 
         item: dict[str, Any] = {
             "t1": t1_tensor,

@@ -62,7 +62,7 @@ else:
 # ---------------------------------------------------------------------------
 try:
     from ml.C_VQA.config import ModelConfig
-    from ml.C_VQA.model import SiameseChangeVQA
+    from ml.C_VQA.model import SiameseChangeVQA, SimpleTokenizer
     from ml.C_VQA.transforms import normalize_image
     from ml.controller.schema import Evidence, ModelRequest, ModelResponse
 except (ImportError, ModuleNotFoundError):
@@ -121,6 +121,8 @@ class ChangeVQAModel:
             model.load_state_dict(ckpt["model"])
             if "answers_vocab" in ckpt:
                 model.answers_vocab = ckpt["answers_vocab"]
+            if "question_vocab" in ckpt:
+                model.tokenizer = SimpleTokenizer(ckpt["question_vocab"])
             print(f"[ChangeVQAModel] Loaded checkpoint from {checkpoint_path} on {device}")
         else:
             config = ModelConfig()

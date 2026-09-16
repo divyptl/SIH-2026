@@ -155,7 +155,7 @@ def train_one_epoch(
             batch, grounding.processor, augmentation, device, cfg.image_size,
         )
 
-        # Forward pass — GroundingDINO returns losses when labels are provided
+        # Forward pass under autocast — GroundingDINO returns losses when labels are provided
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
             outputs = grounding(
                 pixel_values=inputs["pixel_values"],
@@ -170,7 +170,8 @@ def train_one_epoch(
         if loss is None:
             loss = outputs.loss
 
-        # Backward. Scale down so accumulated grads average rather than sum.
+        # Scaled backward pass (fp16 only). Divide by accum so accumulated
+        # grads average rather than sum.
         if scaler is not None:
             scaler.scale(loss / accum).backward()
         else:
@@ -282,6 +283,7 @@ def save_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     metrics: dict,
     model_cfg: ModelConfig,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> None:
     """Save a training checkpoint."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -299,6 +301,8 @@ def save_checkpoint(
             "text_threshold": model_cfg.text_threshold,
         },
     }
+    if scaler is not None:
+        state["scaler"] = scaler.state_dict()
     torch.save(state, path)
     print(f"  Checkpoint saved: {path}")
 
@@ -309,12 +313,15 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: str,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> int:
     """Load a checkpoint. Returns the epoch to resume from."""
     ckpt = torch.load(path, map_location=device, weights_only=False)
     grounding.model.load_state_dict(ckpt["model"])
     optimizer.load_state_dict(ckpt["optimizer"])
     scheduler.load_state_dict(ckpt["scheduler"])
+    if scaler is not None and "scaler" in ckpt:
+        scaler.load_state_dict(ckpt["scaler"])
     print(f"  Resumed from checkpoint: {path} (epoch {ckpt['epoch']})")
     return ckpt["epoch"]
 
@@ -501,9 +508,11 @@ def main() -> None:
         weight_decay=train_cfg.weight_decay,
     )
 
-    # The scheduler advances once per optimizer step, not once per batch
+    # The scheduler advances once per optimizer step, not once per batch. The
+    # loop also steps on a partial final window, so round up — rounding down
+    # runs the cosine past its end, where the LR climbs back up.
     accum = max(train_cfg.grad_accum_steps, 1)
-    steps_per_epoch = max(len(train_loader) // accum, 1)
+    steps_per_epoch = max(math.ceil(len(train_loader) / accum), 1)
     scheduler = get_cosine_schedule(
         optimizer,
         train_cfg.warmup_epochs,
@@ -513,7 +522,8 @@ def main() -> None:
     )
 
     # ── Mixed precision ──
-    # fp16 needs loss scaling to avoid underflow; bf16 does not.
+    # Create the grad scaler before the training loop. fp16 needs loss
+    # scaling to avoid gradient underflow; bf16 does not.
     scaler = (
         torch.amp.GradScaler(device)
         if use_amp and amp_dtype == torch.float16
@@ -527,7 +537,7 @@ def main() -> None:
     start_epoch = 1
     if train_cfg.resume_from:
         start_epoch = load_checkpoint(
-            train_cfg.resume_from, grounding, optimizer, scheduler, device,
+            train_cfg.resume_from, grounding, optimizer, scheduler, device, scaler,
         ) + 1
 
     # ── Training loop ──
@@ -574,14 +584,14 @@ def main() -> None:
         # (e.g. a Colab disconnect) loses at most one epoch
         save_checkpoint(
             train_cfg.checkpoint_path / "last.pt",
-            epoch, grounding, optimizer, scheduler, all_metrics, model_cfg,
+            epoch, grounding, optimizer, scheduler, all_metrics, model_cfg, scaler,
         )
 
         # Save checkpoint
         if epoch % train_cfg.save_every == 0:
             save_checkpoint(
                 train_cfg.checkpoint_path / f"epoch_{epoch}.pt",
-                epoch, grounding, optimizer, scheduler, all_metrics, model_cfg,
+                epoch, grounding, optimizer, scheduler, all_metrics, model_cfg, scaler,
             )
 
         # Save best model
@@ -589,7 +599,7 @@ def main() -> None:
             best_val_loss = val_metrics["val_loss"]
             save_checkpoint(
                 train_cfg.checkpoint_path / "best.pt",
-                epoch, grounding, optimizer, scheduler, all_metrics, model_cfg,
+                epoch, grounding, optimizer, scheduler, all_metrics, model_cfg, scaler,
             )
             print(f"  >> New best model! val_loss={best_val_loss:.4f}")
 
@@ -597,7 +607,7 @@ def main() -> None:
     save_checkpoint(
         train_cfg.checkpoint_path / "final.pt",
         train_cfg.epochs, grounding, optimizer, scheduler,
-        history[-1] if history else {}, model_cfg,
+        history[-1] if history else {}, model_cfg, scaler,
     )
 
     history_path = train_cfg.checkpoint_path / "history.json"

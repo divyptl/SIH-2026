@@ -82,17 +82,28 @@ def test_transforms():
 
     # No augmentation
     aug_off = GroundingAugmentation(augment=False)
-    out_img, out_boxes = aug_off(image, boxes)
+    out_img, out_boxes, out_text = aug_off(image, boxes, "the car on the left")
     assert torch.allclose(out_boxes, boxes), "No-augment should preserve boxes"
+    assert out_text == "the car on the left", "No-augment should preserve text"
 
     # With augmentation (run multiple times to exercise random paths)
     aug_on = GroundingAugmentation(augment=True)
-    for _ in range(10):
-        out_img, out_boxes = aug_on(image, boxes)
+    off_center = torch.tensor([[0.2, 0.5, 0.1, 0.1]])  # box on the left
+    for _ in range(20):
+        out_img, out_boxes, out_text = aug_on(image, off_center, "the car on the left")
         # Boxes should still be valid (cx, cy in [0,1], w, h > 0)
         assert (out_boxes[:, :2] >= 0).all() and (out_boxes[:, :2] <= 1).all(), \
             f"Box centers out of range: {out_boxes}"
         assert (out_boxes[:, 2:] > 0).all(), f"Box dimensions non-positive: {out_boxes}"
+        # A flipped box must come with a flipped description
+        flipped = out_boxes[0, 0] > 0.5
+        assert out_text == ("the car on the right" if flipped else "the car on the left"), \
+            f"Text {out_text!r} disagrees with box {out_boxes}"
+
+    from ml.grounding.transforms import swap_left_right
+    assert swap_left_right("Right-most tank, left of the top-left roof") == \
+        "Left-most tank, right of the top-right roof"
+    assert swap_left_right("the leftmost bright building") == "the rightmost bright building"
 
     print("  ✓ Transform tests passed")
 

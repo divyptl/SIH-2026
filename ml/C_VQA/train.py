@@ -37,7 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ml.C_VQA.config import ModelConfig, TrainConfig
 from ml.C_VQA.dataset import CDVQADataset, cdvqa_collate_fn
-from ml.C_VQA.model import ChangeVQALoss, SiameseChangeVQA
+from ml.C_VQA.model import ChangeVQALoss, SiameseChangeVQA, SimpleTokenizer
 from ml.C_VQA.transforms import PairedBitemporalTransform
 
 
@@ -48,9 +48,13 @@ def get_cosine_schedule_with_warmup(
     warmup_epochs: int,
     total_epochs: int,
     steps_per_epoch: int,
-    min_lr: float = 1e-6,
+    min_lr_ratio: float = 1e-2,
 ) -> torch.optim.lr_scheduler.LambdaLR:
-    """Create a learning rate scheduler with linear warmup and cosine decay."""
+    """Create a learning rate scheduler with linear warmup and cosine decay.
+
+    ``min_lr_ratio`` is a multiplier on each param group's base LR, since
+    LambdaLR scales every group's own LR by the returned factor.
+    """
     warmup_steps = warmup_epochs * steps_per_epoch
     total_steps = total_epochs * steps_per_epoch
 
@@ -59,7 +63,7 @@ def get_cosine_schedule_with_warmup(
             return float(current_step) / float(max(1, warmup_steps))
         progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
         cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return max(min_lr, cosine_decay)
+        return max(min_lr_ratio, cosine_decay)
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -113,7 +117,7 @@ class ChangeVQATrainer:
             warmup_epochs=self.cfg.warmup_epochs,
             total_epochs=self.cfg.epochs,
             steps_per_epoch=steps_per_epoch,
-            min_lr=self.cfg.min_lr,
+            min_lr_ratio=self.cfg.min_lr / self.cfg.lr,
         )
 
         # Checkpointing state
@@ -123,10 +127,21 @@ class ChangeVQATrainer:
         self.checkpoint_dir = Path(self.cfg.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+<<<<<<< Updated upstream
         # Mixed-precision training (AMP)
         self.use_amp = self.cfg.use_amp and self.device == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
+=======
+<<<<<<< Updated upstream
+=======
+        # Mixed-precision training (AMP): create the grad scaler once, before the
+        # training loop, so its loss scale adapts across steps
+        self.use_amp = self.cfg.use_amp and self.device == "cuda"
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes
     def train_epoch(self, epoch: int) -> dict[str, float]:
         """Run one training epoch."""
         self.model.train()
@@ -143,14 +158,32 @@ class ChangeVQATrainer:
             ans_targets = batch["answer_targets"].to(self.device)
             mask_targets = batch["mask_targets"].to(self.device) if batch["mask_targets"] is not None else None
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
+<<<<<<< Updated upstream
             with torch.amp.autocast("cuda", enabled=self.use_amp):
                 outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
                 loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
 
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
+=======
+<<<<<<< Updated upstream
+            outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
+            loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
+
+            loss.backward()
+=======
+            # Forward pass under autocast
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
+                outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
+                loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
+
+            # Scaled backward pass; unscale before clipping so the norm is real
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes
             nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -221,6 +254,8 @@ class ChangeVQATrainer:
             "model_config": vars(self.model_cfg),
             "train_config": vars(self.cfg),
             "answers_vocab": self.model.answers_vocab,
+            "question_vocab": self.model.tokenizer.vocab,
+            "scaler": self.scaler.state_dict(),
         }
 
     def save_checkpoint(self, epoch: int, is_best: bool = False) -> None:
@@ -330,11 +365,14 @@ def train_main(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     try:
+        # Val must index questions/answers exactly as the model was trained
         val_ds = CDVQADataset(
             root=train_cfg.data_root,
             split=train_cfg.split_val,
             max_question_length=model_cfg.max_question_length,
             auto_generate=False,
+            question_vocab=train_ds.question_vocab,
+            answer_vocab=train_ds.answer_vocab,
         )
         print(f"[ChangeVQATrainer] Loaded {len(val_ds)} real validation samples for split '{train_cfg.split_val}'.")
     except (FileNotFoundError, ValueError) as e:
@@ -360,7 +398,17 @@ def train_main(args: argparse.Namespace) -> None:
         else None
     )
 
+    # Size the embedding table and answer head to the data-derived vocabularies
+    model_cfg.vocab_size = len(train_ds.question_vocab)
+    model_cfg.num_classes = len(train_ds.answer_vocab)
+    print(
+        f"[ChangeVQATrainer] Question vocab: {model_cfg.vocab_size} tokens | "
+        f"Answer classes: {model_cfg.num_classes}"
+    )
+
     model = SiameseChangeVQA(config=model_cfg)
+    model.tokenizer = SimpleTokenizer(train_ds.question_vocab)
+    model.answers_vocab = list(train_ds.answer_vocab)
     trainer = ChangeVQATrainer(
         model=model,
         train_loader=train_loader,

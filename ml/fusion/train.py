@@ -115,12 +115,25 @@ def train_one_epoch(
         num_domains = len(batches)
         optimizer.zero_grad()
 
+<<<<<<< Updated upstream
+=======
+<<<<<<< Updated upstream
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        if terrain_head is not None:
+            torch.nn.utils.clip_grad_norm_(terrain_head.parameters(), max_norm=1.0)
+=======
+>>>>>>> Stashed changes
         for sar, optical, terrain_labels in batches:
             sar = normalize_sar(sar.to(device))
             optical = normalize_optical(optical.to(device))
             terrain_labels = terrain_labels.to(device)
 
+<<<<<<< Updated upstream
             # Forward: get embeddings
+=======
+            # Forward pass under autocast
+>>>>>>> Stashed changes
             with torch.amp.autocast("cuda", enabled=use_amp):
                 sar_emb, opt_emb = model(sar, optical)
 
@@ -142,7 +155,11 @@ def train_one_epoch(
                 # Scale the loss to average gradients across domains
                 domain_loss = domain_loss / num_domains
                 
+<<<<<<< Updated upstream
             # Backward IMMEDIATELY to free the graph and VRAM
+=======
+            # Scaled backward pass, run per domain to free the graph and VRAM
+>>>>>>> Stashed changes
             if scaler is not None:
                 scaler.scale(domain_loss).backward()
             else:
@@ -171,6 +188,10 @@ def train_one_epoch(
             if terrain_head is not None:
                 torch.nn.utils.clip_grad_norm_(terrain_head.parameters(), max_norm=1.0)
             optimizer.step()
+<<<<<<< Updated upstream
+=======
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes
 
         scheduler.step()
 
@@ -271,6 +292,7 @@ def save_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     metrics: dict,
     model_cfg: ModelConfig,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> None:
     """Save a training checkpoint."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -289,6 +311,8 @@ def save_checkpoint(
     }
     if terrain_head is not None:
         state["terrain_head"] = terrain_head.state_dict()
+    if scaler is not None:
+        state["scaler"] = scaler.state_dict()
     torch.save(state, path)
     print(f"  Checkpoint saved: {path}")
 
@@ -301,6 +325,7 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: str,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> int:
     """Load a checkpoint. Returns the epoch to resume from."""
     ckpt = torch.load(path, map_location=device, weights_only=False)
@@ -310,6 +335,8 @@ def load_checkpoint(
     scheduler.load_state_dict(ckpt["scheduler"])
     if terrain_head is not None and "terrain_head" in ckpt:
         terrain_head.load_state_dict(ckpt["terrain_head"])
+    if scaler is not None and "scaler" in ckpt:
+        scaler.load_state_dict(ckpt["scaler"])
     print(f"  Resumed from checkpoint: {path} (epoch {ckpt['epoch']})")
     return ckpt["epoch"]
 
@@ -501,12 +528,18 @@ def main() -> None:
         steps_per_epoch,
     )
 
+    # ── AMP setup ──
+    # Create the grad scaler before the training loop (and before resuming, so
+    # a checkpoint can restore its loss scale)
+    use_amp = train_cfg.use_amp and device == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+
     # ── Resume ──
     start_epoch = 1
     if train_cfg.resume_from:
         start_epoch = load_checkpoint(
             train_cfg.resume_from, model, loss_fn, terrain_head,
-            optimizer, scheduler, device,
+            optimizer, scheduler, device, scaler,
         ) + 1
 
     # ── AMP setup ──
@@ -559,7 +592,7 @@ def main() -> None:
         save_checkpoint(
             train_cfg.checkpoint_path / "latest.pt",
             epoch, model, loss_fn, terrain_head,
-            optimizer, scheduler, all_metrics, model_cfg,
+            optimizer, scheduler, all_metrics, model_cfg, scaler,
         )
 
         # Save numbered checkpoint at configured interval
@@ -567,7 +600,7 @@ def main() -> None:
             save_checkpoint(
                 train_cfg.checkpoint_path / f"epoch_{epoch}.pt",
                 epoch, model, loss_fn, terrain_head,
-                optimizer, scheduler, all_metrics, model_cfg,
+                optimizer, scheduler, all_metrics, model_cfg, scaler,
             )
 
         # Save best model
@@ -576,7 +609,7 @@ def main() -> None:
             save_checkpoint(
                 train_cfg.checkpoint_path / "best.pt",
                 epoch, model, loss_fn, terrain_head,
-                optimizer, scheduler, all_metrics, model_cfg,
+                optimizer, scheduler, all_metrics, model_cfg, scaler,
             )
             print(f"  >> New best model! val_loss={best_val_loss:.4f}")
 
@@ -584,7 +617,7 @@ def main() -> None:
     save_checkpoint(
         train_cfg.checkpoint_path / "final.pt",
         train_cfg.epochs, model, loss_fn, terrain_head,
-        optimizer, scheduler, history[-1] if history else {}, model_cfg,
+        optimizer, scheduler, history[-1] if history else {}, model_cfg, scaler,
     )
 
     history_path = train_cfg.checkpoint_path / "history.json"

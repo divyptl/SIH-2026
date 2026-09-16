@@ -119,6 +119,11 @@ def _make_backbone(name: str, pretrained: bool, in_channels: int) -> tuple[nn.Mo
     return backbone, feat_dim
 
 
+<<<<<<< Updated upstream
+=======
+<<<<<<< Updated upstream
+=======
+>>>>>>> Stashed changes
 # ── Self-Attention Transformer Block ────────────────────────────────────
 
 class SelfAttentionBlock(nn.Module):
@@ -179,8 +184,18 @@ class SelfAttentionBlock(nn.Module):
 
         self.norm = nn.LayerNorm(attn_dim)
 
+<<<<<<< Updated upstream
         # Project back to original backbone dimension
         self.proj_out = nn.Linear(attn_dim, feat_dim)
+=======
+        # Project back to original backbone dimension. Zero-init so the block
+        # starts as an identity: a randomly initialised projection adds noise on
+        # the same scale as the pretrained ResNet features, wiping out the
+        # ImageNet initialisation before contrastive training can use it.
+        self.proj_out = nn.Linear(attn_dim, feat_dim)
+        nn.init.zeros_(self.proj_out.weight)
+        nn.init.zeros_(self.proj_out.bias)
+>>>>>>> Stashed changes
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Refine spatial features via self-attention with a residual connection.
@@ -216,6 +231,10 @@ class SelfAttentionBlock(nn.Module):
         return x + out
 
 
+<<<<<<< Updated upstream
+=======
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes
 # ── Projection Head ─────────────────────────────────────────────────────
 
 class ProjectionHead(nn.Module):
