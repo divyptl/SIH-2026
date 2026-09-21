@@ -21,7 +21,7 @@ class ModelConfig:
 
     # Fine-tuning strategy
     freeze_backbone: bool = True        # Freeze Swin-T vision backbone
-    freeze_text_encoder: bool = False   # Keep BERT text encoder trainable
+    freeze_text_encoder: bool = True    # Freeze BERT text encoder (saves ~30-40% backward pass time & VRAM)
 
     # Inference thresholds
     box_threshold: float = 0.25         # Min confidence to keep a predicted box
@@ -37,8 +37,10 @@ class TrainConfig:
     data_cache_dir: str = "data/vrsbench"  # Local cache dir for HF downloads
     image_dir: str | None = None           # Extracted VRSBench images; skips the
                                            # multi-GB archive download when set
+    extracted_image_dir: str = "data/vrsbench/extracted_images"  # Auto-extraction destination
+    auto_extract_zip: bool = True          # Auto-extract downloaded zip to disk once to avoid on-the-fly zip decompression
     download_images: bool = True           # Fetch Images_*.zip from the Hub
-    num_workers: int = 2
+    num_workers: int = 6                   # High-throughput workers for i9 multi-core
     pin_memory: bool = True
 
     # Image preprocessing
@@ -70,11 +72,11 @@ class TrainConfig:
 
     # Memory / throughput
     amp: bool = True                    # Mixed precision (bf16 on CUDA)
-    grad_accum_steps: int = 1           # Optimizer step every N batches; raises
-                                        # effective batch at batch-size memory
+    grad_accum_steps: int = 2           # Optimizer step every N batches; raises
+                                        # effective batch to batch_size * grad_accum_steps (16)
 
     # Optimization
-    batch_size: int = 4                 # Small batches (GroundingDINO is ~172M params)
+    batch_size: int = 8                 # Saturated batch size for 20GB VRAM (RTX A4000)
     epochs: int = 20
     lr: float = 1e-5                    # Low LR for fine-tuning
     backbone_lr: float = 1e-6           # Even lower LR if backbone is unfrozen
@@ -88,9 +90,10 @@ class TrainConfig:
     save_every: int = 5                 # Save checkpoint every N epochs
     resume_from: str | None = None      # Path to checkpoint to resume from
 
-    # Logging
+    # Logging & Validation
     log_every: int = 50                 # Print metrics every N steps
-    eval_every: int = 1                 # Evaluate on val set every N epochs
+    eval_every: int = 5                 # Evaluate on val set every N epochs (avoids 30+ min eval delay each epoch)
+    eval_max_samples: int | None = 1000 # Subsample val set during intermediate epochs for fast verification
 
     # Device
     device: str = "auto"               # auto | cuda | cpu

@@ -104,11 +104,15 @@ def test_config():
     model_cfg = ModelConfig()
     assert model_cfg.model_id == "IDEA-Research/grounding-dino-tiny"
     assert model_cfg.freeze_backbone is True
+    assert model_cfg.freeze_text_encoder is True
     assert model_cfg.box_threshold == 0.25
 
     train_cfg = TrainConfig()
     assert train_cfg.epochs == 20
-    assert train_cfg.batch_size == 4
+    assert train_cfg.batch_size == 8
+    assert train_cfg.grad_accum_steps == 2
+    assert train_cfg.num_workers == 6
+    assert train_cfg.eval_every == 5
     assert train_cfg.lr == 1e-5
     assert train_cfg.data_name == "xiang709/VRSBench"
 

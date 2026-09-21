@@ -229,6 +229,7 @@ def evaluate(
     image_size: int | None = None,
     amp_dtype: torch.dtype = torch.float32,
     loss_weights: dict[str, float] | None = None,
+    max_samples: int | None = None,
 ) -> dict[str, float]:
     """Evaluate on the validation set. Returns average loss metrics."""
     grounding.model.eval()
@@ -238,6 +239,7 @@ def evaluate(
     total_loss_bbox = 0.0
     total_loss_giou = 0.0
     num_batches = 0
+    samples_seen = 0
 
     for batch in val_loader:
         inputs, labels = prepare_training_batch(
@@ -262,6 +264,10 @@ def evaluate(
         total_loss_bbox += term(loss_dict, "loss_bbox")
         total_loss_giou += term(loss_dict, "loss_giou")
         num_batches += 1
+        samples_seen += len(batch["images"])
+
+        if max_samples is not None and samples_seen >= max_samples:
+            break
 
     n = max(num_batches, 1)
     return {
@@ -322,6 +328,11 @@ def load_checkpoint(
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # High-performance hardware acceleration (TF32 on Ampere/Ada like RTX A4000, cuDNN benchmark)
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.benchmark = True
+
     parser = argparse.ArgumentParser(description="Fine-tune GroundingDINO on VRSBench")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -332,6 +343,10 @@ def main() -> None:
     parser.add_argument("--image-dir", type=str, default=None,
                         help="Directory of extracted VRSBench images; avoids "
                              "downloading the multi-GB image archives")
+    parser.add_argument("--extracted-image-dir", type=str, default=None,
+                        help="Directory to extract/locate uncompressed VRSBench images")
+    parser.add_argument("--no-extract-zip", action="store_true",
+                        help="Do not auto-extract image zip files to disk")
     parser.add_argument("--no-download-images", action="store_true",
                         help="Fail instead of downloading VRSBench image archives")
     parser.add_argument("--resume", type=str, default=None)
@@ -341,7 +356,9 @@ def main() -> None:
     parser.add_argument("--no-freeze-backbone", action="store_true",
                         help="Do NOT freeze the vision backbone")
     parser.add_argument("--freeze-text", action="store_true",
-                        help="Also freeze the text encoder")
+                        help="Freeze the text encoder (default: True)")
+    parser.add_argument("--unfreeze-text", action="store_true",
+                        help="Unfreeze the text encoder to train BERT")
     parser.add_argument("--no-augment", action="store_true",
                         help="Disable training augmentations")
     parser.add_argument("--no-amp", action="store_true",
@@ -349,7 +366,9 @@ def main() -> None:
     parser.add_argument("--grad-accum", type=int, default=None,
                         help="Accumulate gradients over N batches before stepping")
     parser.add_argument("--eval-every", type=int, default=None,
-                        help="Run validation every N epochs (default 1)")
+                        help="Run validation every N epochs (default 5)")
+    parser.add_argument("--eval-max-samples", type=int, default=None,
+                        help="Subsample validation set during intermediate epochs (default: 1000)")
     parser.add_argument("--max-samples", type=int, default=None,
                         help="Limit dataset size (for debugging)")
     parser.add_argument("--device", type=str, default=None)
@@ -365,6 +384,8 @@ def main() -> None:
         model_cfg.freeze_backbone = False
     if args.freeze_text:
         model_cfg.freeze_text_encoder = True
+    if args.unfreeze_text:
+        model_cfg.freeze_text_encoder = False
     if args.epochs:
         train_cfg.epochs = args.epochs
     if args.batch_size:
@@ -377,6 +398,10 @@ def main() -> None:
         train_cfg.data_name = args.data_name
     if args.image_dir:
         train_cfg.image_dir = args.image_dir
+    if args.extracted_image_dir:
+        train_cfg.extracted_image_dir = args.extracted_image_dir
+    if args.no_extract_zip:
+        train_cfg.auto_extract_zip = False
     if args.no_download_images:
         train_cfg.download_images = False
     if args.resume:
@@ -391,10 +416,10 @@ def main() -> None:
         train_cfg.grad_accum_steps = args.grad_accum
     if args.eval_every:
         train_cfg.eval_every = args.eval_every
+    if args.eval_max_samples is not None:
+        train_cfg.eval_max_samples = args.eval_max_samples
     if args.num_workers is not None:
         train_cfg.num_workers = args.num_workers
-    elif platform.system() == "Windows":
-        train_cfg.num_workers = 0
     if args.device:
         train_cfg.device = args.device
 
@@ -417,10 +442,13 @@ def main() -> None:
     print(f"  LR:              {train_cfg.lr}")
     print(f"  Device:          {device}")
     print(f"  Dataset:         {train_cfg.data_name}")
+    print(f"  Workers:         {train_cfg.num_workers}")
     print(f"  Augmentation:    {train_cfg.augment}")
     print(f"  Mixed precision: {amp_dtype if use_amp else 'off (fp32)'}")
     print(f"  Grad accum:      {train_cfg.grad_accum_steps} "
           f"(effective batch {train_cfg.batch_size * train_cfg.grad_accum_steps})")
+    print(f"  Eval cadence:    Every {train_cfg.eval_every} epochs "
+          f"(intermediate cap: {train_cfg.eval_max_samples or 'all'})")
     print("=" * 70)
 
     # ── Data ──
@@ -431,6 +459,8 @@ def main() -> None:
         cache_dir=train_cfg.data_cache_dir,
         image_dir=train_cfg.image_dir,
         download_images=train_cfg.download_images,
+        auto_extract_zip=train_cfg.auto_extract_zip,
+        extracted_image_dir=train_cfg.extracted_image_dir,
         max_samples=args.max_samples,
     )
     val_ds = VRSBenchGroundingDataset(
@@ -439,28 +469,46 @@ def main() -> None:
         cache_dir=train_cfg.data_cache_dir,
         image_dir=train_cfg.image_dir,
         download_images=train_cfg.download_images,
+        auto_extract_zip=train_cfg.auto_extract_zip,
+        extracted_image_dir=train_cfg.extracted_image_dir,
         max_samples=args.max_samples // 5 if args.max_samples else None,
     )
 
     print(f"  Train: {len(train_ds):,} samples")
     print(f"  Val:   {len(val_ds):,} samples")
 
+    loader_kwargs = {
+        "batch_size": train_cfg.batch_size,
+        "num_workers": train_cfg.num_workers,
+        "pin_memory": train_cfg.pin_memory,
+        "collate_fn": collate_fn,
+    }
+    if train_cfg.num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 2
+
     train_loader = DataLoader(
         train_ds,
-        batch_size=train_cfg.batch_size,
         shuffle=True,
-        num_workers=train_cfg.num_workers,
-        pin_memory=train_cfg.pin_memory,
-        collate_fn=collate_fn,
         drop_last=True,
+        **loader_kwargs,
     )
+
+    val_workers = min(2, train_cfg.num_workers)
+    val_loader_kwargs = {
+        "batch_size": train_cfg.batch_size,
+        "num_workers": val_workers,
+        "pin_memory": train_cfg.pin_memory,
+        "collate_fn": collate_fn,
+    }
+    if val_workers > 0:
+        val_loader_kwargs["persistent_workers"] = True
+        val_loader_kwargs["prefetch_factor"] = 2
+
     val_loader = DataLoader(
         val_ds,
-        batch_size=train_cfg.batch_size,
         shuffle=False,
-        num_workers=train_cfg.num_workers,
-        pin_memory=train_cfg.pin_memory,
-        collate_fn=collate_fn,
+        **val_loader_kwargs,
     )
 
     # ── Model ──
@@ -546,10 +594,12 @@ def main() -> None:
 
         # Evaluate
         val_metrics = {}
-        if epoch % train_cfg.eval_every == 0:
+        is_final_epoch = (epoch == train_cfg.epochs)
+        if epoch % train_cfg.eval_every == 0 or is_final_epoch:
+            max_eval = None if is_final_epoch else train_cfg.eval_max_samples
             val_metrics = evaluate(
                 grounding, val_loader, device, train_cfg.image_size, amp_dtype,
-                train_cfg.loss_weights,
+                train_cfg.loss_weights, max_samples=max_eval,
             )
 
         elapsed = time.time() - t0
