@@ -189,14 +189,17 @@ def prepare_training_batch(
         **processor_kwargs,
     )
 
-    # Move inputs to device
-    inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+    # Move inputs to device (non_blocking enables overlapping transfer with compute if pinned)
+    inputs = {
+        k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+        for k, v in inputs.items()
+    }
 
     # Move labels to device
     labels = [
         {
-            "class_labels": lbl["class_labels"].to(device),
-            "boxes": lbl["boxes"].to(device),
+            "class_labels": lbl["class_labels"].to(device, non_blocking=True),
+            "boxes": lbl["boxes"].to(device, non_blocking=True),
         }
         for lbl in labels
     ]

@@ -166,6 +166,8 @@ class VRSBenchGroundingDataset(Dataset):
         cache_dir: str | None = None,
         image_dir: str | None = None,
         download_images: bool = True,
+        auto_extract_zip: bool = True,
+        extracted_image_dir: str | None = None,
         local_annotations: str | None = None,
         local_image_dir: str | None = None,
         max_samples: int | None = None,
@@ -181,6 +183,7 @@ class VRSBenchGroundingDataset(Dataset):
             # Load from HuggingFace Hub
             self.samples = self._load_from_hub(
                 data_name, split, cache_dir, image_dir, download_images,
+                auto_extract_zip, extracted_image_dir,
             )
 
         if max_samples is not None:
@@ -197,6 +200,8 @@ class VRSBenchGroundingDataset(Dataset):
         cache_dir: str | None,
         image_dir: str | None,
         download_images: bool,
+        auto_extract_zip: bool = True,
+        extracted_image_dir: str | None = None,
     ) -> list[dict]:
         """Load grounding samples from the VRSBench files on the Hub."""
         if hf_hub_download is None:
@@ -221,6 +226,9 @@ class VRSBenchGroundingDataset(Dataset):
 
         images = self._resolve_images(
             data_name, archive, cache_dir, image_dir, download_images,
+            auto_extract_zip=auto_extract_zip,
+            extracted_image_dir=extracted_image_dir,
+            split=split,
         )
         self.image_source = images
 
@@ -252,14 +260,32 @@ class VRSBenchGroundingDataset(Dataset):
         cache_dir: str | None,
         image_dir: str | None,
         download_images: bool,
+        auto_extract_zip: bool = True,
+        extracted_image_dir: str | None = None,
+        split: str = "train",
     ) -> _ImageSource:
-        """Pick the image directory, or download the split's image archive."""
+        """Pick the image directory, or download and optionally extract the image archive."""
         if image_dir:
             path = Path(image_dir)
             if not path.is_dir():
                 raise FileNotFoundError(f"image_dir does not exist: {path}")
             print(f"  Using local images: {path}")
             return _ImageSource(image_dir=str(path))
+
+        # Check if default extracted directory already exists and has images
+        target_extract_dir = (
+            Path(extracted_image_dir) / split
+            if extracted_image_dir
+            else (Path(cache_dir or "data/vrsbench") / "extracted" / split)
+        )
+        if target_extract_dir.is_dir():
+            has_images = any(
+                p.suffix.lower() in _IMAGE_SUFFIXES
+                for p in target_extract_dir.rglob("*")
+            )
+            if has_images:
+                print(f"  Using existing extracted images: {target_extract_dir}")
+                return _ImageSource(image_dir=str(target_extract_dir))
 
         if not download_images:
             raise RuntimeError(
@@ -282,6 +308,19 @@ class VRSBenchGroundingDataset(Dataset):
             repo_type="dataset",
             cache_dir=cache_dir,
         )
+
+        # High-throughput optimization: extract zip once on SSD to avoid on-the-fly decompress
+        if auto_extract_zip:
+            print(
+                f"  Extracting {archive} to {target_extract_dir} for high-throughput training... "
+                f"(One-time operation to eliminate zipfile decompression bottleneck)"
+            )
+            target_extract_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(target_extract_dir)
+            print(f"  Extraction complete: {target_extract_dir}")
+            return _ImageSource(image_dir=str(target_extract_dir))
+
         return _ImageSource(zip_path=zip_path)
 
     def _parse_hub_item(self, item: dict) -> list[dict]:
