@@ -127,21 +127,11 @@ class ChangeVQATrainer:
         self.checkpoint_dir = Path(self.cfg.checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-<<<<<<< Updated upstream
-        # Mixed-precision training (AMP)
-        self.use_amp = self.cfg.use_amp and self.device == "cuda"
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
-
-=======
-<<<<<<< Updated upstream
-=======
         # Mixed-precision training (AMP): create the grad scaler once, before the
         # training loop, so its loss scale adapts across steps
         self.use_amp = self.cfg.use_amp and self.device == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
->>>>>>> Stashed changes
->>>>>>> Stashed changes
     def train_epoch(self, epoch: int) -> dict[str, float]:
         """Run one training epoch."""
         self.model.train()
@@ -160,20 +150,6 @@ class ChangeVQATrainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
-<<<<<<< Updated upstream
-            with torch.amp.autocast("cuda", enabled=self.use_amp):
-                outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
-                loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
-
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-=======
-<<<<<<< Updated upstream
-            outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
-            loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
-
-            loss.backward()
-=======
             # Forward pass under autocast
             with torch.amp.autocast("cuda", enabled=self.use_amp):
                 outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
@@ -182,8 +158,6 @@ class ChangeVQATrainer:
             # Scaled backward pass; unscale before clipping so the norm is real
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
->>>>>>> Stashed changes
->>>>>>> Stashed changes
             nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()

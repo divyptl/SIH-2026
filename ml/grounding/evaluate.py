@@ -209,6 +209,11 @@ def main() -> None:
                         help="Must match training (default from TrainConfig)")
     parser.add_argument("--image-dir", type=str, default=None,
                         help="Directory of extracted VRSBench validation images")
+    parser.add_argument("--image-zip", type=str, default=None,
+                        help="Images_val.zip you downloaded yourself; read "
+                             "directly, no unpacking needed")
+    parser.add_argument("--annotations", type=str, default=None,
+                        help="VRSBench_EVAL_referring.json you downloaded yourself")
     parser.add_argument("--max-samples", type=int, default=None,
                         help="Evaluate N expressions spread evenly across the file")
     parser.add_argument("--no-amp", action="store_true")
@@ -227,7 +232,13 @@ def main() -> None:
 
     print(f"Device: {device}  |  precision: {amp_dtype}  |  image size: {image_size}")
 
-    dataset = VRSBenchGroundingDataset(split="validation", image_dir=args.image_dir)
+    dataset = VRSBenchGroundingDataset(
+        split="validation",
+        cache_dir=train_cfg.data_cache_dir,
+        image_dir=args.image_dir,
+        annotations_file=args.annotations,
+        image_zip=args.image_zip,
+    )
     if args.max_samples and args.max_samples < len(dataset):
         # The file is ordered by image, so a leading slice covers only a few
         # scenes and classes. Take evenly spaced expressions instead.

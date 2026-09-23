@@ -21,7 +21,8 @@ class ModelConfig:
 
     # Fine-tuning strategy
     freeze_backbone: bool = True        # Freeze Swin-T vision backbone
-    freeze_text_encoder: bool = True    # Freeze BERT text encoder (saves ~30-40% backward pass time & VRAM)
+    # Freeze BERT text encoder (saves ~30-40% backward pass time & VRAM)
+    freeze_text_encoder: bool = True
 
     # Inference thresholds
     box_threshold: float = 0.25         # Min confidence to keep a predicted box
@@ -36,17 +37,25 @@ class TrainConfig:
     data_name: str = "xiang709/VRSBench"   # HuggingFace repo holding VRSBench
     data_cache_dir: str = "data/vrsbench"  # Local cache dir for HF downloads
     image_dir: str | None = None           # Extracted VRSBench images; skips the
-                                           # multi-GB archive download when set
-    extracted_image_dir: str = "data/vrsbench/extracted_images"  # Auto-extraction destination
-    auto_extract_zip: bool = True          # Auto-extract downloaded zip to disk once to avoid on-the-fly zip decompression
+    # multi-GB archive download when set
+    # Auto-extraction destination
+    extracted_image_dir: str = "data/vrsbench/extracted_images"
+    # Auto-extract downloaded zip to disk once to avoid on-the-fly zip decompression
+    auto_extract_zip: bool = True
+    # Files downloaded by hand. Train and validation use different files, so
+    # each split has its own; anything left None is fetched from the Hub.
+    image_zip: str | None = None           # Images_train.zip, read without unpacking
+    val_image_zip: str | None = None       # Images_val.zip
+    annotations_file: str | None = None    # VRSBench_train.json
+    val_annotations_file: str | None = None  # VRSBench_EVAL_referring.json
     download_images: bool = True           # Fetch Images_*.zip from the Hub
     num_workers: int = 6                   # High-throughput workers for i9 multi-core
     pin_memory: bool = True
 
     # Image preprocessing
     image_size: int = 512               # VRSBench tiles are natively 512x512;
-                                        # the processor default (800) upscales
-                                        # them and inflates activation memory
+    # the processor default (800) upscales
+    # them and inflates activation memory
 
     # Augmentation
     augment: bool = True                # Enable training augmentations
@@ -73,10 +82,11 @@ class TrainConfig:
     # Memory / throughput
     amp: bool = True                    # Mixed precision (bf16 on CUDA)
     grad_accum_steps: int = 2           # Optimizer step every N batches; raises
-                                        # effective batch to batch_size * grad_accum_steps (16)
+    # effective batch to batch_size * grad_accum_steps (16)
 
     # Optimization
-    batch_size: int = 8                 # Saturated batch size for 20GB VRAM (RTX A4000)
+    # Saturated batch size for 20GB VRAM (RTX A4000)
+    batch_size: int = 8
     epochs: int = 20
     lr: float = 1e-5                    # Low LR for fine-tuning
     backbone_lr: float = 1e-6           # Even lower LR if backbone is unfrozen
@@ -92,8 +102,10 @@ class TrainConfig:
 
     # Logging & Validation
     log_every: int = 50                 # Print metrics every N steps
-    eval_every: int = 5                 # Evaluate on val set every N epochs (avoids 30+ min eval delay each epoch)
-    eval_max_samples: int | None = 1000 # Subsample val set during intermediate epochs for fast verification
+    # Evaluate on val set every N epochs (avoids 30+ min eval delay each epoch)
+    eval_every: int = 5
+    # Subsample val set during intermediate epochs for fast verification
+    eval_max_samples: int | None = 1000
 
     # Device
     device: str = "auto"               # auto | cuda | cpu

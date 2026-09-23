@@ -354,6 +354,17 @@ def main() -> None:
                         help="Directory to extract/locate uncompressed VRSBench images")
     parser.add_argument("--no-extract-zip", action="store_true",
                         help="Do not auto-extract image zip files to disk")
+    parser.add_argument("--image-zip", type=str, default=None,
+                        help="Images_train.zip you downloaded yourself; read "
+                             "directly, no unpacking needed")
+    parser.add_argument("--val-image-zip", type=str, default=None,
+                        help="Images_val.zip you downloaded yourself")
+    parser.add_argument("--annotations", type=str, default=None,
+                        help="VRSBench_train.json you downloaded yourself; "
+                             "skips the annotation download for the train split")
+    parser.add_argument("--val-annotations", type=str, default=None,
+                        help="VRSBench_EVAL_referring.json you downloaded "
+                             "yourself; used for the validation split")
     parser.add_argument("--no-download-images", action="store_true",
                         help="Fail instead of downloading VRSBench image archives")
     parser.add_argument("--resume", type=str, default=None)
@@ -409,6 +420,14 @@ def main() -> None:
         train_cfg.extracted_image_dir = args.extracted_image_dir
     if args.no_extract_zip:
         train_cfg.auto_extract_zip = False
+    if args.image_zip:
+        train_cfg.image_zip = args.image_zip
+    if args.val_image_zip:
+        train_cfg.val_image_zip = args.val_image_zip
+    if args.annotations:
+        train_cfg.annotations_file = args.annotations
+    if args.val_annotations:
+        train_cfg.val_annotations_file = args.val_annotations
     if args.no_download_images:
         train_cfg.download_images = False
     if args.resume:
@@ -469,6 +488,8 @@ def main() -> None:
         auto_extract_zip=train_cfg.auto_extract_zip,
         extracted_image_dir=train_cfg.extracted_image_dir,
         max_samples=args.max_samples,
+        annotations_file=train_cfg.annotations_file,
+        image_zip=train_cfg.image_zip,
     )
     val_ds = VRSBenchGroundingDataset(
         data_name=train_cfg.data_name,
@@ -479,6 +500,8 @@ def main() -> None:
         auto_extract_zip=train_cfg.auto_extract_zip,
         extracted_image_dir=train_cfg.extracted_image_dir,
         max_samples=args.max_samples // 5 if args.max_samples else None,
+        annotations_file=train_cfg.val_annotations_file,
+        image_zip=train_cfg.val_image_zip,
     )
 
     print(f"  Train: {len(train_ds):,} samples")

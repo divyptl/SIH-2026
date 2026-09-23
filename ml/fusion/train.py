@@ -115,25 +115,12 @@ def train_one_epoch(
         num_domains = len(batches)
         optimizer.zero_grad()
 
-<<<<<<< Updated upstream
-=======
-<<<<<<< Updated upstream
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        if terrain_head is not None:
-            torch.nn.utils.clip_grad_norm_(terrain_head.parameters(), max_norm=1.0)
-=======
->>>>>>> Stashed changes
         for sar, optical, terrain_labels in batches:
             sar = normalize_sar(sar.to(device))
             optical = normalize_optical(optical.to(device))
             terrain_labels = terrain_labels.to(device)
 
-<<<<<<< Updated upstream
-            # Forward: get embeddings
-=======
             # Forward pass under autocast
->>>>>>> Stashed changes
             with torch.amp.autocast("cuda", enabled=use_amp):
                 sar_emb, opt_emb = model(sar, optical)
 
@@ -155,11 +142,7 @@ def train_one_epoch(
                 # Scale the loss to average gradients across domains
                 domain_loss = domain_loss / num_domains
                 
-<<<<<<< Updated upstream
-            # Backward IMMEDIATELY to free the graph and VRAM
-=======
             # Scaled backward pass, run per domain to free the graph and VRAM
->>>>>>> Stashed changes
             if scaler is not None:
                 scaler.scale(domain_loss).backward()
             else:
@@ -188,10 +171,6 @@ def train_one_epoch(
             if terrain_head is not None:
                 torch.nn.utils.clip_grad_norm_(terrain_head.parameters(), max_norm=1.0)
             optimizer.step()
-<<<<<<< Updated upstream
-=======
->>>>>>> Stashed changes
->>>>>>> Stashed changes
 
         scheduler.step()
 
