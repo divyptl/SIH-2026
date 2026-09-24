@@ -16,6 +16,7 @@ import { useTranslation } from 'react-i18next'
 
 import { AnalysisPending } from '#/components/analysis-pending'
 import { AnalysisResult } from '#/components/analysis-result'
+import { PromptSuggestions } from '#/components/prompt-suggestions'
 import { Hero } from '#/components/hero'
 import { ResultEmpty } from '#/components/result-empty'
 import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
@@ -47,11 +48,6 @@ const ACCEPTED_EXTENSIONS = ['.tif', '.tiff']
 const ACCEPT_ATTRIBUTE = [...ACCEPTED_TYPES, ...ACCEPTED_EXTENSIONS].join(',')
 const MAX_FILE_SIZE = 20 * 1024 * 1024
 const MAX_IMAGES = 2
-const EXAMPLE_KEYS = [
-  'home.example1',
-  'home.example2',
-  'home.example3',
-] as const
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -81,6 +77,8 @@ function Home() {
   const abortRef = React.useRef<AbortController | null>(null)
   const [isAnalysing, setIsAnalysing] = React.useState(false)
   const [result, setResult] = React.useState<AnalysisResponse | null>(null)
+  // The question as submitted; the prompt box may be edited after the fact.
+  const [resultQuery, setResultQuery] = React.useState('')
   const [apiError, setApiError] = React.useState<string | null>(null)
 
   // Drop any in-flight request if the user navigates away mid-analysis.
@@ -172,14 +170,16 @@ function Home() {
       resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
 
+    const query = prompt.trim()
     try {
       const response = await analyse({
-        prompt: prompt.trim(),
+        prompt: query,
         images: files,
         language: i18n.resolvedLanguage,
         signal: controller.signal,
       })
       setResult(response)
+      setResultQuery(query)
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === 'AbortError') return
       setApiError(
@@ -355,26 +355,10 @@ function Home() {
                 </InputGroupAddon>
               </InputGroup>
 
-              <div className="flex flex-col gap-2">
-                <span className="text-xs font-medium text-muted-foreground">
-                  {t('home.examplesLabel')}
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {EXAMPLE_KEYS.map((key) => (
-                    <Button
-                      key={key}
-                      type="button"
-                      variant="outline"
-                      size="xs"
-                      dir="auto"
-                      onClick={() => applyExample(t(key))}
-                      className="h-auto min-h-6 py-1 text-start whitespace-normal"
-                    >
-                      {t(key)}
-                    </Button>
-                  ))}
-                </div>
-              </div>
+              <PromptSuggestions
+                imageCount={files.length}
+                onPick={applyExample}
+              />
 
               <FieldDescription id="prompt-hint" className="text-xs/relaxed">
                 {t('home.promptHint')}
@@ -440,7 +424,7 @@ function Home() {
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
               >
-                <AnalysisResult result={result} />
+                <AnalysisResult result={result} query={resultQuery} />
               </motion.div>
             ) : (
               <motion.div

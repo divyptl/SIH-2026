@@ -208,3 +208,72 @@ export async function analyse({
 
   return (await response.json()) as AnalysisResponse
 }
+
+/** Every string the PDF report prints, already in the report's language. */
+export interface ReportLabels {
+  title: string
+  generated: string
+  request: string
+  question: string
+  query_translated: string
+  answer: string
+  english_original: string
+  task: string
+  task_name: string
+  input: string
+  configuration_name: string
+  confidence: string
+  time: string
+  tokens: string
+  language: string
+  language_name: string
+  images: string
+  /** Contains an `{{index}}` placeholder. */
+  image: string
+  modality: Record<Modality, string>
+  georeferenced: string
+  evidence: string
+  /** Contains an `{{index}}` placeholder. */
+  region: string
+  no_spatial: string | null
+  controller_notes: string
+  trace: string
+  routing: string
+  tools: string
+}
+
+export interface ReportArgs {
+  result: AnalysisResponse
+  /** The question exactly as the user typed it. */
+  query: string
+  /** The report's language; `'en'` renders the English original only. */
+  language: string
+  labels: ReportLabels
+}
+
+/** Typeset a result into a PDF on the server and return it as a Blob. */
+export async function downloadReport(args: ReportArgs): Promise<Blob> {
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE_URL}/api/report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+    })
+  } catch {
+    throw new ApiError(
+      `Could not reach the SatQuery API at ${API_BASE_URL}. Is the backend running?`,
+      0,
+    )
+  }
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null)
+    throw new ApiError(
+      extractDetail(payload, `Report failed (HTTP ${response.status}).`),
+      response.status,
+    )
+  }
+
+  return response.blob()
+}

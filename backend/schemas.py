@@ -172,6 +172,55 @@ class AnalysisResponse(BaseModel):
     translation: TranslationInfo | None = None
 
 
+class ReportLabels(BaseModel):
+    """Every string the PDF report prints, already localised by the client.
+
+    The web app owns the UI translations, so it sends the exact wording it shows
+    on screen; the report then reads the same as the page it was exported from.
+    ``image`` and ``region`` contain an ``{{index}}`` placeholder.
+    """
+
+    title: str
+    generated: str
+    request: str
+    question: str
+    query_translated: str
+    answer: str
+    english_original: str
+    task: str
+    task_name: str
+    input: str
+    configuration_name: str
+    confidence: str
+    time: str
+    tokens: str
+    language: str
+    language_name: str
+    images: str
+    image: str
+    modality: dict[Modality, str]
+    georeferenced: str
+    evidence: str
+    region: str
+    no_spatial: str | None = None
+    controller_notes: str
+    trace: str
+    routing: str
+    tools: str
+
+
+class ReportRequest(BaseModel):
+    """Body of ``POST /api/report``: a result the client already holds."""
+
+    result: AnalysisResponse
+    query: str = Field(min_length=1, description="The question exactly as the user typed it.")
+    language: str = Field(
+        default="en",
+        description="Language the report is written in; 'en' renders the English original only.",
+    )
+    labels: ReportLabels
+
+
 class ToolInfo(BaseModel):
     """One entry of the specialist-model registry."""
 

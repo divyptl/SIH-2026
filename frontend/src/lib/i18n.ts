@@ -23,7 +23,7 @@ const localeLoaders = import.meta.glob<{ default: Record<string, unknown> }>([
   '!../locales/en.json',
 ])
 
-async function loadLocale(code: string) {
+export async function loadLocale(code: string) {
   if (i18n.hasResourceBundle(code, 'translation')) return
   const path = `../locales/${code}.json`
   // Languages without a locale file yet fall back to English strings.

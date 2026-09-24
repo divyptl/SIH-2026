@@ -282,13 +282,11 @@ class AgenticController:
         if not answer:
             raise ControllerError("The model returned an empty answer.")
 
+        # The model's own score, as reported; only a missing one is filled in.
+        if payload.get("confidence") is None:
+            warnings.append("The model did not report a confidence score; 0.5 is shown.")
         confidence = _coerce_confidence(payload.get("confidence"))
         evidence = _coerce_evidence(payload.get("evidence"), len(images))
-
-        if not domain_adapted:
-            # An unadapted baseline should not present itself as authoritative
-            # on a domain it was never tuned for.
-            confidence = min(confidence, 0.75)
 
         boxes = sum(1 for item in evidence if item.type == "bbox")
         steps.append(

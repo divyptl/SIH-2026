@@ -52,6 +52,7 @@ All settings are environment variables, read from `backend/.env`.
 | `GET` | `/api/registry` | The specialist-model registry the controller selects from. |
 | `GET` | `/api/languages` | Supported query languages and the translator's state. |
 | `POST` | `/api/analyse` | Run an analysis. |
+| `POST` | `/api/report` | Export an analysis result as a PDF report. |
 
 ### `POST /api/analyse`
 
@@ -81,6 +82,23 @@ curl -X POST http://localhost:8000/api/analyse \
 The response carries the answer, a confidence score, normalised bounding-box
 evidence, and an `trace` object recording the resolved input configuration, the
 routed task and why, the tools selected, and per-step timings.
+
+### `POST /api/report`
+
+JSON body: the `AnalysisResponse` the client already holds (`result`), the
+question as typed (`query`), the report language (`language`; `en` gives the
+English original only) and every printed string already localised (`labels`,
+see `ReportLabels` in `schemas.py`). Returns `application/pdf`. The endpoint is
+stateless: nothing about a result is stored server-side.
+
+The PDF is typeset with [Typst](https://typst.app) from `assets/report.typ`,
+not printed from HTML. It has real pagination, running headers, PDF
+bookmarks, evidence boxes drawn over the imagery, and HarfBuzz-grade shaping
+for every Indic script, including right-to-left Urdu, Kashmiri and Sindhi.
+The fonts it uses ship in `assets/fonts` (Poppins and Noto, SIL Open Font
+License) and system fonts are ignored, so a report renders the same on any
+machine. The labels come from the frontend's `report`, `result` and `home`
+locale strings.
 
 ## Multilingual queries
 
@@ -144,6 +162,10 @@ services/
   images.py                Decoding, validation, pair compatibility, normalisation
   openrouter_client.py     Async OpenRouter SDK wrapper
   translation.py           IndicTrans2 Indic <-> English layer around the controller
+  report.py                Typst PDF export of an analysis result
+assets/
+  report.typ               Report template
+  fonts/                   Poppins + Noto fonts for every supported script
 scripts/
   translate_locales.py     Fills frontend/src/locales/*.json with IndicTrans2
 ```
@@ -155,9 +177,9 @@ scripts/
 
 The problem statement is explicit that a generic VLM does not satisfy the
 requirements, so every registry entry names the specialist that should own its
-task. Until one is registered, the OpenRouter baseline answers instead, the
-response sets `trace.domain_adapted: false`, a warning is attached, and
-confidence is capped at 0.75.
+task. Until one is registered, the OpenRouter baseline answers instead and the
+response sets `trace.domain_adapted: false`. The confidence score is the model's
+own estimate, reported as-is.
 
 To promote a task, implement the module against
 `ml.controller.schema.SpecialistModel`, set `loader` on its `ToolEntry` in

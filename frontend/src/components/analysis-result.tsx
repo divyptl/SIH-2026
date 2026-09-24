@@ -3,8 +3,8 @@ import { CircleAlertIcon, ListTreeIcon } from 'lucide-react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useTranslation } from 'react-i18next'
 
-import CountUp from '#/components/CountUp'
 import { EvidenceOverlay } from '#/components/evidence-overlay'
+import { ReportButton } from '#/components/report-button'
 import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
 import { Badge } from '#/components/ui/badge'
 import { Button } from '#/components/ui/button'
@@ -26,6 +26,8 @@ import type { Language } from '#/lib/languages'
 
 interface AnalysisResultProps {
   result: AnalysisResponse
+  /** The question as the user submitted it. */
+  query: string
 }
 
 function formatMs(ms: number) {
@@ -34,7 +36,7 @@ function formatMs(ms: number) {
 
 const ENGLISH: Pick<Language, 'code' | 'dir'> = { code: 'en', dir: 'ltr' }
 
-export function AnalysisResult({ result }: AnalysisResultProps) {
+export function AnalysisResult({ result, query }: AnalysisResultProps) {
   const { t } = useTranslation()
   const reduceMotion = useReducedMotion()
   const [activeEvidence, setActiveEvidence] = React.useState<number | null>(
@@ -50,6 +52,7 @@ export function AnalysisResult({ result }: AnalysisResultProps) {
       ? getLanguage(translation.target_language)
       : null
   const [showEnglish, setShowEnglish] = React.useState(false)
+  const [reportError, setReportError] = React.useState<string | null>(null)
   const localised = localLanguage !== null && !showEnglish
   const lang = localised ? localLanguage : ENGLISH
 
@@ -67,6 +70,15 @@ export function AnalysisResult({ result }: AnalysisResultProps) {
     result.trace.routing_rationale
 
   const confidencePercent = Math.round(result.confidence * 100)
+  // The bar fills from empty once mounted; the number itself stays still so
+  // nothing around it shifts.
+  const [barValue, setBarValue] = React.useState(
+    reduceMotion ? confidencePercent : 0,
+  )
+  React.useEffect(() => {
+    const frame = requestAnimationFrame(() => setBarValue(confidencePercent))
+    return () => cancelAnimationFrame(frame)
+  }, [confidencePercent])
   const observations = result.evidence.filter(
     (item) => item.type === 'observation',
   )
@@ -104,6 +116,12 @@ export function AnalysisResult({ result }: AnalysisResultProps) {
               </ToggleGroupItem>
             </ToggleGroup>
           )}
+          <ReportButton
+            result={result}
+            query={query}
+            language={lang.code}
+            onError={setReportError}
+          />
           <TraceSheet
             result={result}
             warnings={warnings}
@@ -115,6 +133,12 @@ export function AnalysisResult({ result }: AnalysisResultProps) {
       </CardHeader>
 
       <div className="flex flex-col gap-5 px-(--card-spacing)">
+        {reportError && (
+          <Alert variant="destructive">
+            <CircleAlertIcon />
+            <AlertDescription>{reportError}</AlertDescription>
+          </Alert>
+        )}
         <AnimatePresence mode="wait" initial={false}>
           <motion.p
             key={lang.code}
@@ -136,17 +160,12 @@ export function AnalysisResult({ result }: AnalysisResultProps) {
               {t('result.confidence')}
             </span>
             <Progress
-              value={confidencePercent}
+              value={barValue}
               aria-label={t('result.confidence')}
-              className="w-28"
+              className="w-28 **:data-[slot=progress-indicator]:duration-700 **:data-[slot=progress-indicator]:ease-out"
             />
             <span className="text-sm font-medium tabular-nums">
-              {reduceMotion ? (
-                confidencePercent
-              ) : (
-                <CountUp to={confidencePercent} duration={1} />
-              )}
-              %
+              {confidencePercent}%
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">

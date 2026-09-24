@@ -14,7 +14,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent.controller import AgenticController, ControllerError
@@ -26,6 +26,7 @@ from schemas import (
     LanguageInfo,
     LanguagesResponse,
     RegistryResponse,
+    ReportRequest,
     TraceStep,
     TranslationInfo,
 )
@@ -35,6 +36,7 @@ from services.images import (
     prepare_upload,
 )
 from services.openrouter_client import OpenRouterClient, OpenRouterError
+from services.report import ReportError, render_report
 from services.translation import (
     ENGLISH,
     LANGUAGES,
@@ -111,6 +113,27 @@ def languages() -> LanguagesResponse:
         engine=translator.engine,
         status=state,  # type: ignore[arg-type]
         detail=detail,
+    )
+
+
+@app.post(
+    "/api/report",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}, "description": "The report as a PDF."}},
+    summary="Export an analysis result as a PDF report",
+)
+async def report(request: ReportRequest) -> Response:
+    """Typeset a result the client already holds into a downloadable PDF."""
+    try:
+        pdf = await asyncio.to_thread(render_report, request)
+    except ReportError as exc:
+        logger.warning("Report %s failed: %s", request.result.request_id, exc)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    filename = f"satquery-report-{request.result.request_id[:8]}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

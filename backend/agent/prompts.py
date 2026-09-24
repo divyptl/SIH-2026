@@ -64,9 +64,10 @@ _SHARED_RULES = """\
 Ground every statement in what is actually visible in the imagery. If the imagery \
 does not support an answer, say so plainly instead of guessing.
 
-Report confidence honestly: use above 0.8 only when the visual evidence is \
-unambiguous, and below 0.4 when the imagery is too coarse, too cloudy, or too \
-ambiguous to be sure.
+Always include the top-level "confidence" score: your own estimate, from 0 to 1, \
+that the answer is correct. Report it honestly: above 0.8 only when the visual \
+evidence is unambiguous, and below 0.4 when the imagery is too coarse, too cloudy, \
+or too ambiguous to be sure. Give each evidence entry its own "confidence" too.
 
 Bounding boxes use normalised coordinates in [0, 1], where (0,0) is the top-left \
 corner and (1,1) the bottom-right.

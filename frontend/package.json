@@ -22,6 +22,7 @@
     "@tanstack/react-router": "latest",
     "@tanstack/react-router-devtools": "latest",
     "class-variance-authority": "^0.7.1",
+    "cmdk": "^1.1.1",
     "cn": "^0.2.5",
     "i18next": "^26.4.2",
     "lucide-react": "^1.41.0",

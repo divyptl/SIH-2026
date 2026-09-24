@@ -20,7 +20,6 @@ export default [
       'prettier.config.js',
       // Installed from the React Bits registry via the shadcn CLI; kept as shipped.
       'src/components/BlurText.tsx',
-      'src/components/CountUp.tsx',
       'src/components/ShinyText.tsx',
     ],
   },
