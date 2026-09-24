@@ -5,35 +5,27 @@ import {
   FileImageIcon,
   ImageUpIcon,
   PaperclipIcon,
+  PlusIcon,
+  RotateCcwIcon,
   ScanSearchIcon,
   XIcon,
 } from 'lucide-react'
+import { AnimatePresence, motion } from 'motion/react'
 import { cn } from 'cn'
+import { useTranslation } from 'react-i18next'
 
+import { AnalysisPending } from '#/components/analysis-pending'
 import { AnalysisResult } from '#/components/analysis-result'
+import { Hero } from '#/components/hero'
+import { ResultEmpty } from '#/components/result-empty'
 import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
 import { Badge } from '#/components/ui/badge'
 import { Button } from '#/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from '#/components/ui/card'
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '#/components/ui/empty'
+import { Card } from '#/components/ui/card'
 import {
   Field,
   FieldDescription,
   FieldError,
-  FieldGroup,
   FieldLabel,
 } from '#/components/ui/field'
 import {
@@ -43,7 +35,6 @@ import {
   InputGroupText,
   InputGroupTextarea,
 } from '#/components/ui/input-group'
-import { Skeleton } from '#/components/ui/skeleton'
 import { Spinner } from '#/components/ui/spinner'
 import { ApiError, analyse } from '#/lib/api'
 import type { AnalysisResponse } from '#/lib/api'
@@ -56,6 +47,11 @@ const ACCEPTED_EXTENSIONS = ['.tif', '.tiff']
 const ACCEPT_ATTRIBUTE = [...ACCEPTED_TYPES, ...ACCEPTED_EXTENSIONS].join(',')
 const MAX_FILE_SIZE = 20 * 1024 * 1024
 const MAX_IMAGES = 2
+const EXAMPLE_KEYS = [
+  'home.example1',
+  'home.example2',
+  'home.example3',
+] as const
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -70,39 +66,22 @@ function isAcceptedImage(file: File) {
   return ACCEPTED_EXTENSIONS.some((extension) => name.endsWith(extension))
 }
 
-/** Short format label for the preview badge. */
-function formatLabel(_file: File) {
-  return 'GEOTIFF'
-}
-
 function Home() {
+  const { t, i18n } = useTranslation()
   const inputRef = React.useRef<HTMLInputElement>(null)
+  const promptRef = React.useRef<HTMLTextAreaElement>(null)
+  const resultRef = React.useRef<HTMLDivElement>(null)
   const dragDepth = React.useRef(0)
 
   const [files, setFiles] = React.useState<Array<File>>([])
-  const [previewUrls, setPreviewUrls] = React.useState<Array<string>>([])
   const [prompt, setPrompt] = React.useState('')
   const [isDragging, setIsDragging] = React.useState(false)
-  const [failedThumbnails, setFailedThumbnails] = React.useState<Set<number>>(
-    new Set(),
-  )
   const [error, setError] = React.useState<string | null>(null)
 
   const abortRef = React.useRef<AbortController | null>(null)
   const [isAnalysing, setIsAnalysing] = React.useState(false)
   const [result, setResult] = React.useState<AnalysisResponse | null>(null)
   const [apiError, setApiError] = React.useState<string | null>(null)
-
-  // Keep the object URLs in sync with the selected files and release them on swap.
-  React.useEffect(() => {
-    if (files.length === 0) {
-      setPreviewUrls([])
-      return
-    }
-    const urls = files.map((f) => URL.createObjectURL(f))
-    setPreviewUrls(urls)
-    return () => urls.forEach((url) => URL.revokeObjectURL(url))
-  }, [files])
 
   // Drop any in-flight request if the user navigates away mid-analysis.
   React.useEffect(() => () => abortRef.current?.abort(), [])
@@ -111,33 +90,27 @@ function Home() {
     if (candidates.length === 0) return
     const room = MAX_IMAGES - files.length
     if (room <= 0) {
-      setError(
-        `Up to ${MAX_IMAGES} images per analysis (a cross-modal or bi-temporal pair). Remove one first.`,
-      )
+      setError(t('errors.tooManyFull', { max: MAX_IMAGES }))
       return
     }
+    let partial = false
     if (candidates.length > room) {
-      setError(
-        `Up to ${MAX_IMAGES} images per analysis. Only the first ${room} of your selection were added.`,
-      )
+      partial = true
       candidates = candidates.slice(0, room)
     }
 
     for (const candidate of candidates) {
       if (!isAcceptedImage(candidate)) {
-        setError('Unsupported format. Upload a GeoTIFF (.tif/.tiff).')
+        setError(t('errors.unsupported'))
         return
       }
       if (candidate.size > MAX_FILE_SIZE) {
-        setError(
-          `Image is too large. Keep it under ${formatBytes(MAX_FILE_SIZE)}.`,
-        )
+        setError(t('errors.tooLarge', { size: formatBytes(MAX_FILE_SIZE) }))
         return
       }
     }
 
-    setError(null)
-    setFailedThumbnails(new Set())
+    setError(partial ? t('errors.tooManyPartial', { max: MAX_IMAGES }) : null)
     setFiles((prev) => [...prev, ...candidates])
   }
 
@@ -146,36 +119,41 @@ function Home() {
     setFiles((prev) => prev.filter((_, i) => i !== index))
   }
 
-  const clearFiles = () => {
+  const reset = () => {
+    abortRef.current?.abort()
     setFiles([])
+    setPrompt('')
     setError(null)
+    setResult(null)
+    setApiError(null)
     if (inputRef.current) inputRef.current.value = ''
   }
 
   // Depth counter so dragging over child nodes doesn't flicker the highlight.
-  const onDragEnter = (e: React.DragEvent) => {
-    e.preventDefault()
-    dragDepth.current += 1
-    if (e.dataTransfer.types.includes('Files')) setIsDragging(true)
-  }
-
-  const onDragLeave = (e: React.DragEvent) => {
-    e.preventDefault()
-    dragDepth.current -= 1
-    if (dragDepth.current <= 0) setIsDragging(false)
-  }
-
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    dragDepth.current = 0
-    setIsDragging(false)
-    addFiles(Array.from(e.dataTransfer.files))
+  const dropHandlers = {
+    onDragEnter: (e: React.DragEvent) => {
+      e.preventDefault()
+      dragDepth.current += 1
+      if (e.dataTransfer.types.includes('Files')) setIsDragging(true)
+    },
+    onDragOver: (e: React.DragEvent) => e.preventDefault(),
+    onDragLeave: (e: React.DragEvent) => {
+      e.preventDefault()
+      dragDepth.current -= 1
+      if (dragDepth.current <= 0) setIsDragging(false)
+    },
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault()
+      dragDepth.current = 0
+      setIsDragging(false)
+      addFiles(Array.from(e.dataTransfer.files))
+    },
   }
 
   const handleSubmit = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (files.length === 0) {
-      setError('At least one image is required to run an analysis.')
+      setError(t('errors.imageRequired'))
       return
     }
     if (!prompt.trim() || isAnalysing) return
@@ -189,20 +167,23 @@ function Home() {
     setError(null)
     setApiError(null)
     setResult(null)
+    // On narrow screens the result panel sits below the form.
+    if (window.matchMedia('(max-width: 1023px)').matches) {
+      resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
 
     try {
       const response = await analyse({
         prompt: prompt.trim(),
         images: files,
+        language: i18n.resolvedLanguage,
         signal: controller.signal,
       })
       setResult(response)
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === 'AbortError') return
       setApiError(
-        cause instanceof ApiError
-          ? cause.message
-          : 'Something went wrong running the analysis.',
+        cause instanceof ApiError ? cause.message : t('home.genericError'),
       )
     } finally {
       if (abortRef.current === controller) {
@@ -212,242 +193,268 @@ function Home() {
     }
   }
 
-  const canSubmit =
-    files.length > 0 && prompt.trim().length > 0 && !isAnalysing
+  const canSubmit = files.length > 0 && prompt.trim().length > 0 && !isAnalysing
+
+  const applyExample = (text: string) => {
+    setPrompt(text)
+    promptRef.current?.focus()
+  }
 
   return (
-    <div className="flex justify-center p-4 sm:p-8">
-      <form onSubmit={handleSubmit} className="w-full max-w-2xl">
-        <Card>
-          <CardHeader>
-            <CardTitle>Let&rsquo;s analyze your image!</CardTitle>
-            <CardDescription>
-              Upload a SAR or optical capture and ask anything about what it
-              shows.
-            </CardDescription>
-          </CardHeader>
+    <main>
+      <Hero />
 
-          <CardContent>
-            <FieldGroup>
-              <Field data-invalid={error ? true : undefined}>
-                <FieldLabel htmlFor="image">
-                  Image(s)
-                  <span aria-hidden className="text-destructive">
-                    *
-                  </span>
-                </FieldLabel>
+      <div className="mx-auto grid max-w-6xl gap-6 px-4 pb-16 sm:px-6 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)] lg:items-start lg:gap-8">
+        <Card className="lg:sticky lg:top-20">
+          <form
+            onSubmit={handleSubmit}
+            className="flex flex-col gap-6 px-(--card-spacing)"
+          >
+            <Field data-invalid={error ? true : undefined} className="gap-3">
+              <FieldLabel htmlFor="image">{t('home.imagesLabel')}</FieldLabel>
 
-                <input
-                  ref={inputRef}
-                  id="image"
-                  name="image"
-                  type="file"
-                  accept={ACCEPT_ATTRIBUTE}
-                  multiple={files.length < MAX_IMAGES - 1}
-                  aria-required
-                  className="sr-only"
-                  onChange={(e) => {
-                    addFiles(Array.from(e.target.files ?? []))
-                    e.target.value = ''
-                  }}
-                />
+              <input
+                ref={inputRef}
+                id="image"
+                name="image"
+                type="file"
+                accept={ACCEPT_ATTRIBUTE}
+                multiple={files.length < MAX_IMAGES - 1}
+                aria-required
+                className="sr-only"
+                onChange={(e) => {
+                  addFiles(Array.from(e.target.files ?? []))
+                  e.target.value = ''
+                }}
+              />
 
-                {files.length > 0 ? (
-                  <div className="flex flex-col gap-2">
-                    {files.map((f, index) => (
-                      <div
-                        key={`${f.name}-${index}`}
-                        className="flex items-center gap-3 rounded-xl border p-2"
-                      >
-                        {failedThumbnails.has(index) ? (
-                          // Browsers cannot decode TIFF/GeoTIFF, so fall back
-                          // to an icon rather than showing a broken image.
-                          <div className="flex size-16 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                            <FileImageIcon />
-                          </div>
-                        ) : (
-                          <img
-                            src={previewUrls[index]}
-                            alt={`Preview of ${f.name}`}
-                            onError={() =>
-                              setFailedThumbnails(
-                                (prev) => new Set(prev).add(index),
-                              )
-                            }
-                            className="size-16 shrink-0 rounded-lg object-cover"
-                          />
-                        )}
-                        <div className="flex min-w-0 flex-col gap-1">
-                          <span className="truncate text-sm font-medium">
-                            {f.name}
-                          </span>
-                          <div className="flex items-center gap-1.5">
-                            <Badge variant="secondary">
-                              {formatLabel(f)}
-                            </Badge>
-                            <span className="text-xs text-muted-foreground">
-                              {formatBytes(f.size)}
-                            </span>
-                          </div>
-                        </div>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon-sm"
-                          aria-label={`Remove ${f.name}`}
-                          className="ml-auto"
-                          onClick={() => removeFile(index)}
-                        >
-                          <XIcon />
-                        </Button>
-                      </div>
-                    ))}
-                    {files.length < MAX_IMAGES ? (
-                      <div
-                        onDragEnter={onDragEnter}
-                        onDragOver={(e) => e.preventDefault()}
-                        onDragLeave={onDragLeave}
-                        onDrop={onDrop}
-                        onClick={() => inputRef.current?.click()}
-                        className={cn(
-                          'cursor-pointer rounded-xl border border-dashed py-3 text-center text-sm text-muted-foreground transition-colors hover:bg-muted/50',
-                          isDragging && 'border-ring bg-muted/50',
-                        )}
-                      >
-                        {isDragging
-                          ? 'Drop to attach'
-                          : 'Add a second image (optical+SAR pair or before/after)'}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <div
-                    onDragEnter={onDragEnter}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDragLeave={onDragLeave}
-                    onDrop={onDrop}
-                    onClick={() => inputRef.current?.click()}
-                    className={cn(
-                      'cursor-pointer rounded-xl border border-dashed transition-colors hover:bg-muted/50',
-                      isDragging && 'border-ring bg-muted/50',
-                    )}
+              <AnimatePresence initial={false}>
+                {files.map((f, index) => (
+                  <motion.div
+                    key={`${f.name}-${f.size}-${f.lastModified}`}
+                    layout
+                    initial={{ opacity: 0, y: -6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, x: 12 }}
+                    transition={{ duration: 0.18 }}
+                    className="flex items-center gap-3 rounded-lg border p-2"
                   >
-                    <Empty className="border-0 py-8">
-                      <EmptyHeader>
-                        <EmptyMedia variant="icon">
-                          <ImageUpIcon />
-                        </EmptyMedia>
-                        <EmptyTitle>
-                          {isDragging
-                            ? 'Drop to attach'
-                            : 'Drop image(s) here'}
-                        </EmptyTitle>
-                        <EmptyDescription>
-                          or click to browse &mdash; one image, or two for a
-                          cross-modal / bi-temporal pair
-                        </EmptyDescription>
-                      </EmptyHeader>
-                    </Empty>
-                  </div>
-                )}
-
-                <FieldDescription>
-                  Required. One georeferenced GeoTIFF (.tif/.tiff), or two for a
-                  co-registered optical+SAR pair or before/after comparison
-                  &mdash; each up to {formatBytes(MAX_FILE_SIZE)}.
-                </FieldDescription>
-                {error ? <FieldError>{error}</FieldError> : null}
-              </Field>
-
-              <Field>
-                <FieldLabel htmlFor="prompt">
-                  Prompt
-                  <span aria-hidden className="text-destructive">
-                    *
-                  </span>
-                </FieldLabel>
-                <InputGroup>
-                  <InputGroupTextarea
-                    id="prompt"
-                    name="prompt"
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    placeholder="e.g. How many ships are docked in the harbour?"
-                    aria-required
-                    className="min-h-20"
-                  />
-                  <InputGroupAddon align="block-end">
-                    <InputGroupButton
+                    <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                      <FileImageIcon className="size-4" />
+                    </div>
+                    <div className="flex min-w-0 flex-col gap-0.5">
+                      <span className="truncate text-sm font-medium" dir="auto">
+                        {f.name}
+                      </span>
+                      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <Badge
+                          variant="secondary"
+                          className="h-4 px-1.5 text-[10px]"
+                        >
+                          GeoTIFF
+                        </Badge>
+                        <span className="tabular-nums">
+                          {formatBytes(f.size)}
+                        </span>
+                      </span>
+                    </div>
+                    <Button
                       type="button"
-                      disabled={files.length >= MAX_IMAGES}
-                      onClick={() => inputRef.current?.click()}
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={t('home.remove', { name: f.name })}
+                      className="ms-auto"
+                      onClick={() => removeFile(index)}
                     >
-                      <PaperclipIcon />
-                      {files.length > 0 ? 'Add image' : 'Attach image'}
-                    </InputGroupButton>
-                    <InputGroupText className="ml-auto text-xs">
-                      {files.length === 0
-                        ? 'No attachment'
-                        : `${files.length} attachment${files.length > 1 ? 's' : ''}`}
-                    </InputGroupText>
-                  </InputGroupAddon>
-                </InputGroup>
-              </Field>
-            </FieldGroup>
-          </CardContent>
+                      <XIcon />
+                    </Button>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
 
-          <CardFooter className="justify-end gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={(files.length === 0 && !prompt) || isAnalysing}
-              onClick={() => {
-                clearFiles()
-                setPrompt('')
-                setResult(null)
-                setApiError(null)
-              }}
-            >
-              Reset
-            </Button>
-            <Button type="submit" disabled={!canSubmit}>
-              {isAnalysing ? (
-                <Spinner data-icon="inline-start" />
-              ) : (
-                <ScanSearchIcon data-icon="inline-start" />
+              {files.length < MAX_IMAGES && (
+                <button
+                  type="button"
+                  {...dropHandlers}
+                  onClick={() => inputRef.current?.click()}
+                  className={cn(
+                    'flex w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-4 text-center transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
+                    files.length === 0 ? 'py-8' : 'py-3',
+                    isDragging && 'border-foreground bg-muted',
+                  )}
+                >
+                  {files.length === 0 ? (
+                    <>
+                      <span className="flex size-9 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                        <ImageUpIcon className="size-4" />
+                      </span>
+                      <span className="text-sm font-medium">
+                        {isDragging
+                          ? t('home.dropToAttach')
+                          : t('home.dropHere')}
+                      </span>
+                      <span className="max-w-xs text-xs/relaxed text-muted-foreground">
+                        {t('home.browseHint')}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <PlusIcon className="size-4 shrink-0" />
+                      {isDragging
+                        ? t('home.dropToAttach')
+                        : t('home.addSecond')}
+                    </span>
+                  )}
+                </button>
               )}
-              {isAnalysing ? 'Analyzing…' : 'Analyze'}
-            </Button>
-          </CardFooter>
+
+              <FieldDescription className="text-xs/relaxed">
+                {t('home.imagesHelp', { size: formatBytes(MAX_FILE_SIZE) })}
+              </FieldDescription>
+              {error ? <FieldError>{error}</FieldError> : null}
+            </Field>
+
+            <Field className="gap-3">
+              <FieldLabel htmlFor="prompt">{t('home.promptLabel')}</FieldLabel>
+              <InputGroup>
+                <InputGroupTextarea
+                  ref={promptRef}
+                  id="prompt"
+                  name="prompt"
+                  dir="auto"
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  onKeyDown={(e) => {
+                    // Ctrl/Cmd+Enter submits, the usual shortcut for multi-line inputs.
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault()
+                      e.currentTarget.form?.requestSubmit()
+                    }
+                  }}
+                  placeholder={t('home.promptPlaceholder')}
+                  aria-required
+                  aria-describedby="prompt-hint"
+                  className="min-h-24"
+                />
+                <InputGroupAddon align="block-end">
+                  <InputGroupButton
+                    type="button"
+                    disabled={files.length >= MAX_IMAGES}
+                    onClick={() => inputRef.current?.click()}
+                  >
+                    <PaperclipIcon />
+                    {files.length > 0
+                      ? t('home.addImage')
+                      : t('home.attachImage')}
+                  </InputGroupButton>
+                  <InputGroupText className="ms-auto text-xs tabular-nums">
+                    {files.length === 0
+                      ? t('home.noAttachment')
+                      : t('home.attachments', { count: files.length })}
+                  </InputGroupText>
+                </InputGroupAddon>
+              </InputGroup>
+
+              <div className="flex flex-col gap-2">
+                <span className="text-xs font-medium text-muted-foreground">
+                  {t('home.examplesLabel')}
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {EXAMPLE_KEYS.map((key) => (
+                    <Button
+                      key={key}
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      dir="auto"
+                      onClick={() => applyExample(t(key))}
+                      className="h-auto min-h-6 py-1 text-start whitespace-normal"
+                    >
+                      {t(key)}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+
+              <FieldDescription id="prompt-hint" className="text-xs/relaxed">
+                {t('home.promptHint')}
+              </FieldDescription>
+            </Field>
+
+            <div className="flex items-center gap-2 border-t pt-4">
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={files.length === 0 && !prompt && !result}
+                onClick={reset}
+              >
+                <RotateCcwIcon data-icon="inline-start" />
+                {t('home.reset')}
+              </Button>
+              <Button type="submit" disabled={!canSubmit} className="ms-auto">
+                {isAnalysing ? (
+                  <Spinner data-icon="inline-start" />
+                ) : (
+                  <ScanSearchIcon data-icon="inline-start" />
+                )}
+                {isAnalysing ? t('home.analyzing') : t('home.analyze')}
+              </Button>
+            </div>
+          </form>
         </Card>
 
-        {apiError && (
-          <Alert variant="destructive" className="mt-4">
-            <CircleAlertIcon />
-            <AlertTitle>Analysis failed</AlertTitle>
-            <AlertDescription>{apiError}</AlertDescription>
-          </Alert>
-        )}
-
-        {isAnalysing && (
-          <Card className="mt-4">
-            <CardContent className="flex flex-col gap-2.5 py-2">
-              <Skeleton className="h-4 w-2/5" />
-              <Skeleton className="h-4 w-full" />
-              <Skeleton className="h-4 w-4/5" />
-              <p className="text-xs text-muted-foreground">
-                Routing the query and running the selected specialist…
-              </p>
-            </CardContent>
-          </Card>
-        )}
-
-        {result && !isAnalysing && (
-          <div className="mt-4">
-            <AnalysisResult result={result} />
-          </div>
-        )}
-      </form>
-    </div>
+        <section
+          ref={resultRef}
+          aria-live="polite"
+          aria-busy={isAnalysing}
+          className="min-w-0 scroll-mt-20"
+        >
+          <AnimatePresence mode="wait">
+            {isAnalysing ? (
+              <motion.div
+                key="pending"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+              >
+                <AnalysisPending fileCount={files.length} />
+              </motion.div>
+            ) : apiError ? (
+              <motion.div
+                key="error"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+              >
+                <Alert variant="destructive">
+                  <CircleAlertIcon />
+                  <AlertTitle>{t('home.analysisFailed')}</AlertTitle>
+                  <AlertDescription>{apiError}</AlertDescription>
+                </Alert>
+              </motion.div>
+            ) : result ? (
+              <motion.div
+                key={result.request_id}
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+              >
+                <AnalysisResult result={result} />
+              </motion.div>
+            ) : (
+              <motion.div
+                key="empty"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+              >
+                <ResultEmpty />
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </section>
+      </div>
+    </main>
   )
 }

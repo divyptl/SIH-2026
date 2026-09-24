@@ -45,6 +45,32 @@ class Settings:
         # Keeps token cost bounded and stays well inside provider limits.
         self.max_image_edge_px: int = int(os.getenv("MAX_IMAGE_EDGE_PX", "1280"))
 
+        # Indic <-> English translation layer (services/translation.py). Queries in
+        # any supported Indian language are translated to English before routing,
+        # and the answer is translated back. Both checkpoints are gated on Hugging
+        # Face: accept their licence and put HF_TOKEN in this .env.
+        self.translation_enabled: bool = os.getenv("TRANSLATION_ENABLED", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        self.indic_en_model: str = os.getenv(
+            "INDICTRANS_INDIC_EN_MODEL", "ai4bharat/indictrans2-indic-en-dist-200M"
+        )
+        self.en_indic_model: str = os.getenv(
+            "INDICTRANS_EN_INDIC_MODEL", "ai4bharat/indictrans2-en-indic-dist-200M"
+        )
+        # "auto" picks CUDA when available, else CPU. Also accepts "cpu", "cuda:1", ...
+        self.translation_device: str = os.getenv("TRANSLATION_DEVICE", "auto")
+        self.translation_beams: int = int(os.getenv("TRANSLATION_BEAMS", "5"))
+        self.translation_batch_size: int = int(os.getenv("TRANSLATION_BATCH_SIZE", "16"))
+        # Load both checkpoints at startup instead of on the first non-English query.
+        self.translation_preload: bool = os.getenv("TRANSLATION_PRELOAD", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
         self.cors_origins: list[str] = _csv(
             "CORS_ORIGINS",
             "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173",

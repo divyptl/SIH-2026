@@ -10,4 +10,20 @@ dependencies = [
     "pillow>=12.3.0",
     "python-dotenv>=1.2.3",
     "python-multipart>=0.0.32",
+    # Indic <-> English translation layer (services/translation.py).
+    "torch>=2.9.0",
+    # IndicTransToolkit and the IndicTrans2 remote code do not support transformers 5.
+    "transformers>=4.51,<5",
+    "sentencepiece>=0.2.0",
+    "indictranstoolkit>=1.1.1",
 ]
+
+# CUDA 13 wheels (RTX 50-series needs CUDA >= 12.8). CPU-only machines still work:
+# the translator falls back to CPU when no GPU is visible.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]

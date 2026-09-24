@@ -252,7 +252,8 @@ class GroundingInference:
         outputs = self.grounding(**inputs)
 
         picked = rerank_outputs(
-            self.reranker, outputs, inputs["pixel_values"], inputs["attention_mask"],
+            self.reranker, outputs, inputs["pixel_values"], inputs["input_ids"],
+            inputs["attention_mask"],
         )
         threshold = box_threshold or self.grounding.config.box_threshold
         scale = torch.tensor([w, h, w, h], device=self.device)

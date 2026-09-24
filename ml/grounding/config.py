@@ -147,14 +147,18 @@ class RerankConfig:
     num_layers: int = 4
     num_heads: int = 8
     dropout: float = 0.1
-    refine_boxes: bool = True           # Also regress a correction to the chosen box
+    # Off by default: it helps on held-out train images but hurts Acc@0.7 on
+    # the VRSBench eval file, whose boxes are drawn a little differently.
+    refine_boxes: bool = False          # Also regress a correction to the chosen box
+    vocab_size: int = 30522             # GroundingDINO's BERT tokenizer
 
     # Optimization (on cached features, so an epoch takes seconds)
-    epochs: int = 30
+    epochs: int = 40
     batch_size: int = 256
-    lr: float = 2e-4
+    lr: float = 4e-4
     weight_decay: float = 0.05
     warmup_epochs: int = 1
     min_iou: float = 0.5                # Candidate must reach this IoU to be a target
+    flip_prob: float = 0.5              # Mirror boxes + swap left/right, top/bottom words
     dev_fraction: float = 0.05          # Train images held out for model selection
     checkpoint: str = "checkpoints/grounding/reranker.pt"

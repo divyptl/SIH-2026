@@ -84,7 +84,7 @@ class ImageInfo(BaseModel):
 class TraceStep(BaseModel):
     """One observable step of the agentic execution trace."""
 
-    stage: Literal["validate", "classify", "select", "execute", "aggregate"]
+    stage: Literal["translate", "validate", "classify", "select", "execute", "aggregate"]
     tool: str
     model: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
@@ -119,6 +119,43 @@ class Usage(BaseModel):
     cost: float | None = None
 
 
+class TranslationInfo(BaseModel):
+    """What the translation layer did around the English-only models.
+
+    The top-level ``answer`` and ``evidence`` always stay in English, exactly as
+    the model produced them; the localised copies live here.
+    """
+
+    engine: str
+    source_language: str = Field(description="Language code the query was read as.")
+    source_detected: bool = Field(
+        description="True when inferred from the script rather than the client's hint."
+    )
+    target_language: str = Field(description="Language code the answer was translated to.")
+    original_query: str
+    english_query: str
+    answer: str | None = Field(
+        default=None,
+        description="Answer in the target language; null if back-translation failed.",
+    )
+    evidence_descriptions: list[str] | None = Field(
+        default=None,
+        description="Evidence descriptions in the target language, index-aligned with evidence.",
+    )
+    evidence_labels: list[str | None] | None = Field(
+        default=None,
+        description="Evidence labels in the target language, index-aligned with evidence.",
+    )
+    warnings: list[str] | None = Field(
+        default=None,
+        description="Trace warnings in the target language, index-aligned with trace.warnings.",
+    )
+    routing_rationale: str | None = Field(
+        default=None,
+        description="The router's rationale in the target language.",
+    )
+
+
 class AnalysisResponse(BaseModel):
     """Evidence-grounded response returned to the client."""
 
@@ -132,6 +169,7 @@ class AnalysisResponse(BaseModel):
     inputs: list[ImageInfo] = Field(default_factory=list)
     trace: ExecutionTrace
     usage: Usage | None = None
+    translation: TranslationInfo | None = None
 
 
 class ToolInfo(BaseModel):
@@ -155,6 +193,20 @@ class HealthResponse(BaseModel):
     openrouter_configured: bool
     vision_model: str
     router_model: str
+
+
+class LanguageInfo(BaseModel):
+    code: str
+    name: str
+    native_name: str
+    rtl: bool = False
+
+
+class LanguagesResponse(BaseModel):
+    languages: list[LanguageInfo]
+    engine: str
+    status: Literal["disabled", "unavailable", "idle", "ready"]
+    detail: str | None = None
 
 
 class ErrorResponse(BaseModel):

@@ -1,4 +1,5 @@
 import { MoonIcon, SunIcon } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 
 import { Button } from '#/components/ui/button'
 import {
@@ -13,6 +14,7 @@ import type { Theme } from '#/components/theme-provider'
 
 function ModeToggle() {
   const { theme, setTheme } = useTheme()
+  const { t } = useTranslation()
 
   return (
     <DropdownMenu>
@@ -21,16 +23,22 @@ function ModeToggle() {
       >
         <SunIcon className="rotate-0 scale-100 transition-transform dark:-rotate-90 dark:scale-0" />
         <MoonIcon className="absolute rotate-90 scale-0 transition-transform dark:rotate-0 dark:scale-100" />
-        <span className="sr-only">Toggle theme</span>
+        <span className="sr-only">{t('header.toggleTheme')}</span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuRadioGroup
           value={theme}
           onValueChange={(value: Theme) => setTheme(value)}
         >
-          <DropdownMenuRadioItem value="light">Light</DropdownMenuRadioItem>
-          <DropdownMenuRadioItem value="dark">Dark</DropdownMenuRadioItem>
-          <DropdownMenuRadioItem value="system">System</DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="light">
+            {t('header.light')}
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="dark">
+            {t('header.dark')}
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="system">
+            {t('header.system')}
+          </DropdownMenuRadioItem>
         </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </DropdownMenu>

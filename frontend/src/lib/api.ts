@@ -54,7 +54,8 @@ export interface ImageInfo {
 }
 
 export interface TraceStep {
-  stage: 'validate' | 'classify' | 'select' | 'execute' | 'aggregate'
+  stage:
+    'translate' | 'validate' | 'classify' | 'select' | 'execute' | 'aggregate'
   tool: string
   model: string | null
   params: Record<string, unknown>
@@ -81,6 +82,28 @@ export interface Usage {
   cost: number | null
 }
 
+/** What the translation layer did; `answer`/`evidence` stay in English. */
+export interface TranslationInfo {
+  engine: string
+  /** Language code the query was read as. */
+  source_language: string
+  /** True when inferred from the script rather than the language hint. */
+  source_detected: boolean
+  /** Language code the answer was translated to. */
+  target_language: string
+  original_query: string
+  english_query: string
+  /** Answer in `target_language`; null if back-translation failed. */
+  answer: string | null
+  /** Index-aligned with `evidence`; null if back-translation failed. */
+  evidence_descriptions: Array<string> | null
+  /** Index-aligned with `evidence`; null if back-translation failed. */
+  evidence_labels?: Array<string | null> | null
+  /** Index-aligned with `trace.warnings`; null if back-translation failed. */
+  warnings?: Array<string> | null
+  routing_rationale?: string | null
+}
+
 export interface AnalysisResponse {
   request_id: string
   task: Task
@@ -92,21 +115,7 @@ export interface AnalysisResponse {
   inputs: Array<ImageInfo>
   trace: ExecutionTrace
   usage: Usage | null
-}
-
-export const TASK_LABELS: Record<Task, string> = {
-  vqa: 'Visual question answering',
-  caption: 'Scene description',
-  grounding: 'Region grounding',
-  change_vqa: 'Change VQA',
-  change_description: 'Change description',
-  fusion: 'Optical–SAR fusion',
-}
-
-export const CONFIGURATION_LABELS: Record<InputConfiguration, string> = {
-  single: 'Single image',
-  cross_modal_pair: 'Cross-modal pair',
-  bi_temporal_pair: 'Bi-temporal pair',
+  translation: TranslationInfo | null
 }
 
 /** An error carrying the HTTP status, so callers can distinguish causes. */
@@ -150,6 +159,11 @@ export interface AnalyseArgs {
   modalities?: Array<Modality>
   /** Optional task override; omit to let the controller route. */
   task?: Task
+  /**
+   * The user's language code (see `src/lib/languages.ts`). Non-English queries
+   * are translated to English server-side, and the answer is translated back.
+   */
+  language?: string
   signal?: AbortSignal
 }
 
@@ -158,6 +172,7 @@ export async function analyse({
   images,
   modalities,
   task,
+  language,
   signal,
 }: AnalyseArgs): Promise<AnalysisResponse> {
   const body = new FormData()
@@ -165,6 +180,7 @@ export async function analyse({
   for (const image of images) body.append('images', image)
   if (modalities?.length) body.append('modalities', modalities.join(','))
   if (task) body.append('task', task)
+  if (language) body.append('language', language)
 
   let response: Response
   try {

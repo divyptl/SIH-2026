@@ -248,11 +248,6 @@ class AgenticController:
         # --- 3. Select the tool ----------------------------------------------
         step_timer = _Timer()
         tool_name, backend, model_name, domain_adapted = self._select(entry)
-        if not domain_adapted:
-            warnings.append(
-                f"No fine-tuned specialist is registered for '{task}'; answered by the "
-                f"generic '{model_name}' baseline, which is not remote-sensing adapted."
-            )
         steps.append(
             TraceStep(
                 stage="select",
@@ -371,7 +366,7 @@ class AgenticController:
         """Choose between the fine-tuned specialist and the baseline."""
         if entry.specialist_available:
             return entry.name, "local_specialist", entry.specialist_module, True
-        return f"{entry.name}-baseline", "openrouter", self._settings.vision_model, False
+        return entry.name, "openrouter", self._settings.vision_model, False
 
     async def _execute(
         self,

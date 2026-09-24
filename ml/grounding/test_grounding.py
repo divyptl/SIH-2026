@@ -159,6 +159,7 @@ def test_reranker():
         "tok_logits": torch.randn(b, k, t),
         "text": torch.randn(b, t, 256),
         "text_mask": torch.ones(b, t, dtype=torch.bool),
+        "input_ids": torch.randint(1, 30522, (b, t)),
     }
     inputs["cand_mask"][0, 6:] = False
     inputs["text_mask"][1, 8:] = False
@@ -218,7 +219,7 @@ def test_model_loading():
 
     from ml.grounding.rerank import extract_candidates
     cands = extract_candidates(
-        outputs, inputs["pixel_values"], inputs["attention_mask"],
+        outputs, inputs["pixel_values"], inputs["input_ids"], inputs["attention_mask"],
         k=10, nms_iou=0.5, max_text_tokens=48,
     )
     assert cands["hidden"].shape == (1, 10, 256)

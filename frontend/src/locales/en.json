@@ -1,0 +1,82 @@
+{
+  "header": {
+    "language": "Language",
+    "toggleTheme": "Toggle theme",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System"
+  },
+  "home": {
+    "title": "Let’s analyze your image!",
+    "subtitle": "Upload a SAR or optical capture and ask anything about what it shows.",
+    "imagesLabel": "Images",
+    "dropToAttach": "Drop to attach",
+    "addSecond": "Add a second image (optical+SAR pair or before/after)",
+    "dropHere": "Drop images here",
+    "browseHint": "or click to browse — one image, or two for a cross-modal / bi-temporal pair",
+    "imagesHelp": "Required. One georeferenced GeoTIFF (.tif/.tiff), or two for a co-registered optical+SAR pair or before/after comparison — each up to {{size}}.",
+    "previewAlt": "Preview of {{name}}",
+    "remove": "Remove {{name}}",
+    "promptLabel": "Prompt",
+    "promptPlaceholder": "e.g. How many ships are docked in the harbour?",
+    "promptHint": "Write in English or any of the 22 Indian languages. Your question is translated to English for the models, and the answer is translated back.",
+    "examplesLabel": "Try an example",
+    "example1": "Which areas in this image are flooded?",
+    "example2": "What changed between these two dates?",
+    "example3": "Describe the land cover in this scene.",
+    "addImage": "Add image",
+    "attachImage": "Attach image",
+    "noAttachment": "No attachment",
+    "attachments": "Attachments: {{count}}",
+    "reset": "Reset",
+    "analyze": "Analyze",
+    "analyzing": "Analyzing…",
+    "analysisFailed": "Analysis failed",
+    "genericError": "Something went wrong running the analysis.",
+    "running": "Routing the query and running the selected specialist…"
+  },
+  "errors": {
+    "tooManyFull": "Up to {{max}} images per analysis (a cross-modal or bi-temporal pair). Remove one first.",
+    "tooManyPartial": "Up to {{max}} images per analysis. The extra images were not added.",
+    "unsupported": "Unsupported format. Upload a GeoTIFF (.tif/.tiff).",
+    "tooLarge": "Image is too large. Keep it under {{size}}.",
+    "imageRequired": "At least one image is required to run an analysis."
+  },
+  "result": {
+    "title": "Analysis",
+    "emptyTitle": "Your analysis will appear here",
+    "emptyBody": "Add an image and ask a question. The answer appears here, with the evidence marked on the image.",
+    "englishOriginal": "Original answer (English)",
+    "queryTranslated": "Your query was translated to English as:",
+    "confidence": "Confidence",
+    "image": "Image {{index}}",
+    "georeferenced": "georeferenced",
+    "evidence": "Evidence ({{count}})",
+    "noSpatial": "Items with no location on the image: {{count}}",
+    "controllerNotes": "Notes from the controller",
+    "trace": "Execution trace ({{count}} steps)",
+    "request": "Request",
+    "routing": "Routing",
+    "tools": "Tools",
+    "tokens": "Tokens",
+    "region": "Region {{index}}"
+  },
+  "task": {
+    "vqa": "Visual question answering",
+    "caption": "Scene description",
+    "grounding": "Region grounding",
+    "change_vqa": "Change VQA",
+    "change_description": "Change description",
+    "fusion": "Optical–SAR fusion"
+  },
+  "configuration": {
+    "single": "Single image",
+    "cross_modal_pair": "Cross-modal pair",
+    "bi_temporal_pair": "Bi-temporal pair"
+  },
+  "modality": {
+    "optical": "optical",
+    "sar": "SAR",
+    "unknown": "unknown"
+  }
+}

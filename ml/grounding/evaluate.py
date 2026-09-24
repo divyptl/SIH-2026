@@ -132,7 +132,8 @@ def predict(
         # prediction for the expression is the most confident query's box.
         if reranker is not None:
             picked = rerank_outputs(
-                reranker, outputs, inputs["pixel_values"], inputs["attention_mask"],
+                reranker, outputs, inputs["pixel_values"], inputs["input_ids"],
+                inputs["attention_mask"],
             )
             best_score = picked["probs"][:, 0]
             pred_boxes = picked["boxes"][:, 0]

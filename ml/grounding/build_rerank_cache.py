@@ -9,8 +9,8 @@ Usage:
     python -m ml.grounding.build_rerank_cache --checkpoint checkpoints/grounding/best.pt --split train
     python -m ml.grounding.build_rerank_cache --checkpoint checkpoints/grounding/best.pt --split validation
 
-Roughly 20 samples/s on a laptop RTX 5070 Ti: about an hour for train
-(~72K expressions) and 15 minutes for validation (~16K).
+Roughly 20 samples/s on a laptop RTX 5070 Ti: about 30 minutes for train
+(~36K expressions) and 15 minutes for validation (~16K).
 """
 
 from __future__ import annotations
@@ -49,6 +49,7 @@ FEATURES = {
     "tok_logits": (np.float16, lambda k, t, d: (k, t)),
     "text": (np.float16, lambda k, t, d: (t, d)),
     "text_mask": (np.bool_, lambda k, t, d: (t,)),
+    "input_ids": (np.int32, lambda k, t, d: (t,)),
 }
 
 
@@ -128,7 +129,7 @@ def main() -> None:
                     token_type_ids=inputs.get("token_type_ids"),
                 )
             cands = extract_candidates(
-                outputs, inputs["pixel_values"], inputs["attention_mask"],
+                outputs, inputs["pixel_values"], inputs["input_ids"], inputs["attention_mask"],
                 k=k, nms_iou=rcfg.nms_iou, max_text_tokens=t,
             )
             rows = np.asarray(batch["indices"])

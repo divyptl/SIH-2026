@@ -36,6 +36,63 @@ from ml.grounding.rerank import CandidateReranker, candidate_ious, rerank_loss
 FEATURE_KEYS = ("hidden", "roi", "boxes", "scores", "cand_mask", "tok_logits", "text", "text_mask")
 
 
+def tokenize_expressions(texts: list[str], max_tokens: int) -> np.ndarray:
+    """BERT token ids for expressions, prompted exactly as prepare_training_batch does.
+
+    Caches built before `input_ids` was stored are completed from their text.
+    """
+    from transformers import AutoProcessor
+
+    tokenizer = AutoProcessor.from_pretrained("IDEA-Research/grounding-dino-tiny").tokenizer
+    prompts = []
+    for text in texts:
+        prompt = text.strip().lower()
+        prompts.append(prompt if prompt.endswith(".") else prompt + ".")
+    enc = tokenizer(prompts, padding="max_length", truncation=True, max_length=max_tokens,
+                    return_tensors="np")
+    return (enc["input_ids"] * enc["attention_mask"]).astype(np.int64)
+
+
+# Words that trade places when the image is mirrored. Each is a single BERT
+# token, and suffixes ("left" + "##most") carry over unchanged.
+HORIZONTAL_SWAPS = [("left", "right"), ("west", "east"), ("western", "eastern")]
+VERTICAL_SWAPS = [("top", "bottom"), ("upper", "lower"), ("north", "south"),
+                  ("northern", "southern")]
+
+
+def swap_table(pairs: list[tuple[str, str]], vocab_size: int) -> torch.Tensor:
+    """Token-id lookup that maps each word in `pairs` to its partner."""
+    from transformers import AutoProcessor
+
+    tokenizer = AutoProcessor.from_pretrained("IDEA-Research/grounding-dino-tiny").tokenizer
+    table = torch.arange(vocab_size)
+    for a, b in pairs:
+        ia, ib = tokenizer.convert_tokens_to_ids([a, b])
+        table[ia], table[ib] = ib, ia
+    return table
+
+
+def random_flip(
+    inputs: dict[str, torch.Tensor], gt: torch.Tensor, tables: dict[str, torch.Tensor], p: float,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    """Mirror a random subset of samples horizontally and/or vertically.
+
+    Boxes and the expression's position words are flipped together, so the
+    target stays correct. GroundingDINO's own features are left as they are,
+    which only adds noise: they turned out to carry little of the position
+    language (see CandidateReranker.word_embed).
+    """
+    boxes, gt, ids = inputs["boxes"].clone(), gt.clone(), inputs["input_ids"]
+    for axis, table in tables.items():
+        flip = torch.rand(len(gt), device=gt.device) < p
+        coord = 0 if axis == "h" else 1
+        valid = inputs["cand_mask"] & flip.unsqueeze(1)
+        boxes[..., coord] = torch.where(valid, 1 - boxes[..., coord], boxes[..., coord])
+        gt[flip, coord] = 1 - gt[flip, coord]
+        ids = torch.where(flip.unsqueeze(1), table[ids], ids)
+    return {**inputs, "boxes": boxes, "input_ids": ids}, gt
+
+
 class CachedCandidates:
     """A cached split held in memory, with the candidate list cut to K."""
 
@@ -53,6 +110,16 @@ class CachedCandidates:
             self.data[key] = torch.from_numpy(np.ascontiguousarray(array))
         self.gt = torch.from_numpy(np.load(cache_dir / "gt.npy"))
         self.samples = self.meta["samples"]
+
+        ids_file = cache_dir / "input_ids.npy"
+        if ids_file.exists():
+            ids = np.load(ids_file).astype(np.int64)
+        else:
+            ids = tokenize_expressions([s["text"] for s in self.samples],
+                                       self.meta["max_text_tokens"])
+        if not ((ids > 0) == self.data["text_mask"].numpy()).all():
+            raise ValueError(f"Token ids in {cache_dir} do not line up with its text mask")
+        self.data["input_ids"] = torch.from_numpy(ids)
 
     def __len__(self) -> int:
         return len(self.gt)
@@ -148,6 +215,10 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--num-candidates", type=int, default=None)
     parser.add_argument("--no-refine", action="store_true")
+    parser.add_argument("--refine", action="store_true")
+    parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--flip-prob", type=float, default=None,
+                        help="Chance of mirroring each axis per sample (0 disables)")
     parser.add_argument("--output", default=None, help="Checkpoint path")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
@@ -161,6 +232,12 @@ def main() -> None:
         cfg.num_candidates = args.num_candidates
     if args.no_refine:
         cfg.refine_boxes = False
+    if args.refine:
+        cfg.refine_boxes = True
+    if args.dropout is not None:
+        cfg.dropout = args.dropout
+    if args.flip_prob is not None:
+        cfg.flip_prob = args.flip_prob
     if args.output:
         cfg.checkpoint = args.output
     cache_dir = Path(args.cache_dir or cfg.cache_dir)
@@ -189,6 +266,11 @@ def main() -> None:
         else 0.5 * (1 + math.cos(math.pi * (s - warmup) / max(total - warmup, 1))),
     )
 
+    flip_tables = {
+        "h": swap_table(HORIZONTAL_SWAPS, cfg.vocab_size).to(device),
+        "v": swap_table(VERTICAL_SWAPS, cfg.vocab_size).to(device),
+    }
+
     iou_key = "iou_refined" if cfg.refine_boxes else "iou"
     best_acc, best_state, best_epoch = -1.0, None, 0
     for epoch in range(1, cfg.epochs + 1):
@@ -198,6 +280,8 @@ def main() -> None:
         running = {}
         for start in range(0, len(perm), cfg.batch_size):
             inputs, gt = train_data.batch(perm[start:start + cfg.batch_size], device)
+            if cfg.flip_prob > 0:
+                inputs, gt = random_flip(inputs, gt, flip_tables, cfg.flip_prob)
             logits, refined = model(inputs)
             loss, stats = rerank_loss(logits, refined, inputs, gt, cfg.min_iou, cfg.refine_boxes)
             optimizer.zero_grad(set_to_none=True)

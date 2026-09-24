@@ -64,6 +64,7 @@ def _level_shapes(height: int, width: int, total: int) -> list[tuple[int, int]]:
 def extract_candidates(
     outputs,
     pixel_values: torch.Tensor,
+    input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     k: int,
     nms_iou: float,
@@ -83,6 +84,7 @@ def extract_candidates(
         tok_logits  (B, K, T)    each candidate's match logit per text token
         text        (B, T, 256)  fused text-token features
         text_mask   (B, T)       True for real text tokens
+        input_ids   (B, T)       the expression's BERT token ids, 0-padded
     """
     logits = outputs.logits.float()                               # (B, Q, T0)
     logits = torch.nan_to_num(logits, neginf=MASKED_LOGIT).clamp(min=MASKED_LOGIT)
@@ -111,9 +113,11 @@ def extract_candidates(
         "tok_logits": torch.full((batch, k, max_text_tokens), MASKED_LOGIT, device=device),
         "text": torch.zeros(batch, max_text_tokens, dim, device=device),
         "text_mask": torch.zeros(batch, max_text_tokens, dtype=torch.bool, device=device),
+        "input_ids": torch.zeros(batch, max_text_tokens, dtype=torch.long, device=device),
     }
     out["text"][:, :t0] = text[:, :t0]
     out["text_mask"][:, :t0] = attention_mask[:, :t0].bool()
+    out["input_ids"][:, :t0] = input_ids[:, :t0] * attention_mask[:, :t0]
 
     scale = torch.tensor([width, height, width, height], device=device, dtype=torch.float32)
     for b in range(batch):
@@ -179,6 +183,12 @@ class CandidateReranker(nn.Module):
         d = self.config.d_model
 
         self.text_proj = nn.Sequential(nn.Linear(feature_dim, d), nn.LayerNorm(d))
+        # GroundingDINO's fused text features come from a frozen BERT tuned to
+        # match object nouns to regions; position words ("left", "top-most")
+        # barely register in them. Trainable word embeddings give the
+        # re-ranker a direct handle on every word.
+        self.word_embed = nn.Embedding(self.config.vocab_size, d, padding_idx=0)
+        self.pos_embed = nn.Embedding(self.config.max_text_tokens, d)
         self.cand_proj = nn.Sequential(
             nn.Linear(2 * feature_dim + d, d), nn.GELU(), nn.Linear(d, d), nn.LayerNorm(d),
         )
@@ -200,7 +210,9 @@ class CandidateReranker(nn.Module):
         mask = inputs["cand_mask"]
         text_mask = inputs["text_mask"]
         boxes = inputs["boxes"]
-        text = self.text_proj(inputs["text"])
+        ids = inputs["input_ids"]
+        positions = torch.arange(ids.shape[1], device=ids.device)
+        text = self.text_proj(inputs["text"]) + self.word_embed(ids) + self.pos_embed(positions)
 
         # What each candidate matched in the expression, as a text summary.
         weights = inputs["tok_logits"].masked_fill(~text_mask.unsqueeze(1), -1e4).softmax(-1)
@@ -314,6 +326,7 @@ def rerank_outputs(
     reranker: CandidateReranker,
     outputs,
     pixel_values: torch.Tensor,
+    input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
     """Re-rank a GroundingDINO forward pass.
@@ -323,7 +336,7 @@ def rerank_outputs(
     """
     cfg = reranker.config
     cands = extract_candidates(
-        outputs, pixel_values, attention_mask,
+        outputs, pixel_values, input_ids, attention_mask,
         k=cfg.num_candidates, nms_iou=cfg.nms_iou, max_text_tokens=cfg.max_text_tokens,
     )
     picked = reranker.select(cands)

@@ -69,7 +69,12 @@ unambiguous, and below 0.4 when the imagery is too coarse, too cloudy, or too \
 ambiguous to be sure.
 
 Bounding boxes use normalised coordinates in [0, 1], where (0,0) is the top-left \
-corner and (1,1) the bottom-right."""
+corner and (1,1) the bottom-right.
+
+The image numbers 0 and 1 are only for "image_index". In "answer", "label" and \
+"description", which the user reads, call them "the first image" and "the second \
+image" (or "the earlier image" and "the later image" for a before/after pair), never \
+"image 0" or "image 1"."""
 
 _TASK_INSTRUCTIONS: dict[Task, str] = {
     "vqa": """\
