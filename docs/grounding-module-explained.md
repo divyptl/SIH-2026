@@ -177,6 +177,22 @@ python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt --rer
 
 The re-rankers are tied to the detector that produced their candidates: after retraining GroundingDINO, rebuild the caches and retrain the re-rankers.
 
+### Training the detector on several GPUs (e.g. Kaggle 2× T4)
+
+`train.py` supports multi-GPU training through PyTorch DDP: launch it with `torchrun`, one process per GPU. `--batch-size` is **per GPU**; the effective batch is `batch-size × grad-accum × GPUs`. Rank 0 alone downloads the data, evaluates, logs and saves checkpoints.
+
+```bash
+PYTHONUNBUFFERED=1 timeout --signal=INT 11h torchrun --nproc_per_node=2 -m ml.grounding.train \
+    --epochs 20 --batch-size 4 --grad-accum 4 --num-workers 2 \
+    --checkpoint-dir /kaggle/working/checkpoints/grounding \
+    --resume <path to last.pt or final.pt>
+```
+
+- **Keep the effective batch when resuming.** The original run used batch 4 × grad-accum 8 on one GPU (32). On two GPUs, 4 × 4 × 2 gives the same 32 and the same number of optimizer steps per epoch, so the learning-rate schedule resumes in the right place.
+- **Sessions:** Kaggle stops a session after 12 hours. `timeout 11h` ends training cleanly before that, and the next session resumes from the previous output's `last.pt`. Checkpoints now carry the training history and the best validation loss, so `history.json` and `best.pt` stay correct across sessions.
+- **Precision:** T4s have no bf16, so training uses fp16 with loss scaling automatically; this was checked to train stably from the epoch-9 checkpoint.
+- **Disk:** VRSBench needs ~25 GB with extraction, more than Kaggle's 20 GB `/kaggle/working`. Clone the repo to `/tmp` and point only `--checkpoint-dir` at `/kaggle/working`.
+
 ---
 
 ## 6. Inference flow (what runs in production)
