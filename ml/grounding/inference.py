@@ -16,7 +16,7 @@ Usage:
     # Two-stage: fine-tuned GroundingDINO + candidate re-ranker (most accurate)
     model = GroundingInference.from_checkpoint(
         "checkpoints/grounding/best.pt",
-        reranker_path="checkpoints/grounding/reranker.pt",
+        reranker_path="checkpoints/grounding/reranker.pt",  # or a list: an ensemble
     )
 
     # Or zero-shot pre-trained
@@ -46,7 +46,7 @@ except ImportError:
 
 from ml.grounding.config import ModelConfig, TrainConfig
 from ml.grounding.model import GroundingModel
-from ml.grounding.rerank import CandidateReranker, load_reranker, rerank_outputs
+from ml.grounding.rerank import RerankerEnsemble, load_reranker_ensemble, rerank_outputs
 
 
 class GroundingInference:
@@ -63,13 +63,13 @@ class GroundingInference:
         self,
         grounding: GroundingModel,
         device: str = "cpu",
-        reranker: CandidateReranker | None = None,
+        reranker: RerankerEnsemble | None = None,
     ) -> None:
         self.grounding = grounding
         self.grounding.model.to(device)
         self.grounding.model.eval()
         self.device = device
-        self.reranker = reranker.to(device).eval() if reranker is not None else None
+        self.reranker = reranker
 
     @classmethod
     def from_pretrained(
@@ -109,16 +109,16 @@ class GroundingInference:
         cls,
         checkpoint_path: str,
         device: str = "auto",
-        reranker_path: str | None = None,
+        reranker_path: str | list[str] | None = None,
     ) -> "GroundingInference":
         """Load a fine-tuned model from a training checkpoint.
 
         Args:
             checkpoint_path: Path to the .pt checkpoint file.
             device: Target device.
-            reranker_path: Re-ranker trained on this checkpoint's candidates
-                (train_rerank.py). Without it, the top box is GroundingDINO's
-                most confident query.
+            reranker_path: Re-ranker(s) trained on this checkpoint's candidates
+                (train_rerank.py); several are averaged. Without one, the top box
+                is GroundingDINO's most confident query.
 
         Returns:
             GroundingInference ready for inference.
@@ -147,8 +147,8 @@ class GroundingInference:
 
         reranker = None
         if reranker_path:
-            reranker = load_reranker(reranker_path, device)
-            print(f"Loaded candidate re-ranker from {reranker_path}")
+            reranker = load_reranker_ensemble(reranker_path, device)
+            print(f"Loaded candidate re-ranker(s): {reranker_path}")
 
         return cls(grounding=grounding, device=device, reranker=reranker)
 
@@ -429,7 +429,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run grounding inference")
     parser.add_argument("--checkpoint", default=None, help="Path to fine-tuned .pt checkpoint")
     parser.add_argument("--pretrained", action="store_true", help="Use zero-shot pre-trained model")
-    parser.add_argument("--reranker", default=None,
+    parser.add_argument("--reranker", nargs="+", default=None,
                         help="Re-ranker .pt trained on --checkpoint's candidates")
     parser.add_argument("--image", required=True, help="Path to satellite image")
     parser.add_argument("--query", required=True, help="Text query (e.g. 'buildings near road')")

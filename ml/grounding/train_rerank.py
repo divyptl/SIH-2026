@@ -31,7 +31,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from ml.grounding.config import RerankConfig
-from ml.grounding.rerank import CandidateReranker, candidate_ious, rerank_loss
+from ml.grounding.rerank import (
+    HORIZONTAL_SWAPS, VERTICAL_SWAPS, CandidateReranker, candidate_ious, mirror,
+    rerank_loss, swap_table,
+)
 
 FEATURE_KEYS = ("hidden", "roi", "boxes", "scores", "cand_mask", "tok_logits", "text", "text_mask")
 
@@ -53,44 +56,41 @@ def tokenize_expressions(texts: list[str], max_tokens: int) -> np.ndarray:
     return (enc["input_ids"] * enc["attention_mask"]).astype(np.int64)
 
 
-# Words that trade places when the image is mirrored. Each is a single BERT
-# token, and suffixes ("left" + "##most") carry over unchanged.
-HORIZONTAL_SWAPS = [("left", "right"), ("west", "east"), ("western", "eastern")]
-VERTICAL_SWAPS = [("top", "bottom"), ("upper", "lower"), ("north", "south"),
-                  ("northern", "southern")]
-
-
-def swap_table(pairs: list[tuple[str, str]], vocab_size: int) -> torch.Tensor:
-    """Token-id lookup that maps each word in `pairs` to its partner."""
-    from transformers import AutoProcessor
-
-    tokenizer = AutoProcessor.from_pretrained("IDEA-Research/grounding-dino-tiny").tokenizer
-    table = torch.arange(vocab_size)
-    for a, b in pairs:
-        ia, ib = tokenizer.convert_tokens_to_ids([a, b])
-        table[ia], table[ib] = ib, ia
-    return table
-
-
 def random_flip(
     inputs: dict[str, torch.Tensor], gt: torch.Tensor, tables: dict[str, torch.Tensor], p: float,
 ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     """Mirror a random subset of samples horizontally and/or vertically.
 
-    Boxes and the expression's position words are flipped together, so the
-    target stays correct. GroundingDINO's own features are left as they are,
-    which only adds noise: they turned out to carry little of the position
-    language (see CandidateReranker.word_embed).
+    Boxes and the expression's position words are flipped together (see
+    rerank.mirror), so the target stays correct. GroundingDINO's own features
+    are left as they are, which only adds noise: they turned out to carry
+    little of the position language (see CandidateReranker.word_embed).
     """
-    boxes, gt, ids = inputs["boxes"].clone(), gt.clone(), inputs["input_ids"]
-    for axis, table in tables.items():
+    gt = gt.clone()
+    out = inputs
+    for axis in ("h", "v"):
         flip = torch.rand(len(gt), device=gt.device) < p
+        mirrored = mirror(out, axis == "h", axis == "v", tables)
+        out = {
+            **out,
+            "boxes": torch.where(flip[:, None, None], mirrored["boxes"], out["boxes"]),
+            "input_ids": torch.where(flip[:, None], mirrored["input_ids"], out["input_ids"]),
+        }
         coord = 0 if axis == "h" else 1
-        valid = inputs["cand_mask"] & flip.unsqueeze(1)
-        boxes[..., coord] = torch.where(valid, 1 - boxes[..., coord], boxes[..., coord])
         gt[flip, coord] = 1 - gt[flip, coord]
-        ids = torch.where(flip.unsqueeze(1), table[ids], ids)
-    return {**inputs, "boxes": boxes, "input_ids": ids}, gt
+    return out, gt
+
+
+def bert_word_embeddings() -> torch.Tensor:
+    """GroundingDINO's own BERT word-embedding matrix, (vocab, 768)."""
+    from transformers import AutoModelForZeroShotObjectDetection
+
+    model = AutoModelForZeroShotObjectDetection.from_pretrained("IDEA-Research/grounding-dino-tiny")
+    weight = next(
+        p for name, p in model.named_parameters()
+        if "text_backbone" in name and name.endswith("word_embeddings.weight")
+    )
+    return weight.detach().clone()
 
 
 class CachedCandidates:
@@ -219,6 +219,9 @@ def main() -> None:
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--flip-prob", type=float, default=None,
                         help="Chance of mirroring each axis per sample (0 disables)")
+    parser.add_argument("--text-layers", type=int, default=None)
+    parser.add_argument("--bert-words", action="store_true",
+                        help="768-d word embeddings initialized from BERT")
     parser.add_argument("--output", default=None, help="Checkpoint path")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
@@ -238,6 +241,10 @@ def main() -> None:
         cfg.dropout = args.dropout
     if args.flip_prob is not None:
         cfg.flip_prob = args.flip_prob
+    if args.text_layers is not None:
+        cfg.text_layers = args.text_layers
+    if args.bert_words:
+        cfg.word_dim, cfg.init_words_from_bert = 768, True
     if args.output:
         cfg.checkpoint = args.output
     cache_dir = Path(args.cache_dir or cfg.cache_dir)
@@ -253,7 +260,11 @@ def main() -> None:
     print(f"  train {len(train_rows):,}  dev {len(dev_rows):,}  eval {len(val_rows):,}  "
           f"(K={cfg.num_candidates})")
 
-    model = CandidateReranker(cfg).to(device)
+    model = CandidateReranker(cfg)
+    if cfg.init_words_from_bert:
+        with torch.no_grad():
+            model.word_embed.weight.copy_(bert_word_embeddings())
+    model = model.to(device)
     print(f"  Re-ranker params: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)

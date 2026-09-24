@@ -151,6 +151,9 @@ class RerankConfig:
     # the VRSBench eval file, whose boxes are drawn a little differently.
     refine_boxes: bool = False          # Also regress a correction to the chosen box
     vocab_size: int = 30522             # GroundingDINO's BERT tokenizer
+    word_dim: int | None = None         # Word-embedding width; 768 allows BERT init
+    init_words_from_bert: bool = False  # Start word embeddings from BERT's vocabulary
+    text_layers: int = 0                # Self-attention layers over the expression
 
     # Optimization (on cached features, so an epoch takes seconds)
     epochs: int = 40

@@ -23,6 +23,11 @@ Usage:
     # Two-stage: GroundingDINO candidates chosen between by the re-ranker
     python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt \
         --reranker checkpoints/grounding/reranker.pt
+
+    # Several re-rankers are averaged; --no-tta / --no-fuse switch off the
+    # test-time flips and box fusion
+    python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt \
+        --reranker checkpoints/grounding/reranker*.pt
 """
 
 from __future__ import annotations
@@ -47,7 +52,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from ml.grounding.config import ModelConfig, TrainConfig
 from ml.grounding.dataset import VRSBenchGroundingDataset, collate_fn
 from ml.grounding.model import GroundingModel
-from ml.grounding.rerank import CandidateReranker, load_reranker, rerank_outputs
+from ml.grounding.rerank import RerankerEnsemble, load_reranker_ensemble, rerank_outputs
 from ml.grounding.train import resolve_amp
 from ml.grounding.transforms import prepare_training_batch
 
@@ -95,7 +100,7 @@ def predict(
     num_workers: int,
     image_size: int,
     amp_dtype: torch.dtype,
-    reranker: CandidateReranker | None = None,
+    reranker: RerankerEnsemble | None = None,
 ) -> list[dict]:
     """Run the model over the dataset and score its top-1 box per expression.
 
@@ -221,9 +226,13 @@ def main() -> None:
     source.add_argument("--checkpoint", type=str, help="Fine-tuned .pt checkpoint")
     source.add_argument("--pretrained", action="store_true",
                         help="Evaluate the zero-shot pre-trained model")
-    parser.add_argument("--reranker", type=str, default=None,
-                        help="Re-ranker .pt from train_rerank.py; picks among the "
-                             "checkpoint's candidates")
+    parser.add_argument("--reranker", type=str, nargs="+", default=None,
+                        help="Re-ranker .pt file(s) from train_rerank.py; picks among "
+                             "the checkpoint's candidates. Several are averaged.")
+    parser.add_argument("--no-tta", action="store_true",
+                        help="Re-ranker: skip the mirrored test-time views")
+    parser.add_argument("--no-fuse", action="store_true",
+                        help="Re-ranker: return the chosen candidate's box unfused")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--image-size", type=int, default=None,
@@ -273,11 +282,14 @@ def main() -> None:
     if args.reranker:
         if args.pretrained:
             parser.error("--reranker needs the --checkpoint it was trained on")
-        reranker = load_reranker(args.reranker, device)
+        reranker = load_reranker_ensemble(
+            args.reranker, device, tta=not args.no_tta,
+            fuse_iou=None if args.no_fuse else 0.3,
+        )
         trained_on = reranker.detector_checkpoint
         if trained_on and Path(trained_on).resolve() != Path(args.checkpoint).resolve():
             print(f"  Warning: re-ranker was trained on candidates from {trained_on}")
-        model_name += f" + re-ranker {args.reranker}"
+        model_name += f" + {len(reranker.models)} re-ranker(s)"
     print(f"Loaded {model_name}\n")
 
     records = predict(

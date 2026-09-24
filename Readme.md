@@ -52,7 +52,7 @@ Captioning              (bi-temporal)   Fusion
 | Task | Approach | Fine-tuned on |
 |---|---|---|
 | Visual Question Answering / Captioning | Pretrained Vision-Language Model (BLIP-2 or a remote-sensing-adapted VLM like RS-LLaVA / GeoChat) | RSVQA, VRSBench |
-| Text-guided Region Grounding | GroundingDINO / lightweight grounding head | VRSBench grounding subset |
+| Text-guided Region Grounding | GroundingDINO proposes 10 boxes, a transformer re-ranker picks the described one ([details](docs/grounding-module-explained.md)) | VRSBench grounding subset |
 | Change Detection / Change-VQA | Siamese vision encoder + VLM head | CDVQA |
 | Optical–SAR Fusion | CLIP-style dual-encoder, contrastive pretraining | Sentinel-1 & 2 |
 

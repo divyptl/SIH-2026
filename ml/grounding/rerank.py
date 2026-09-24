@@ -187,8 +187,19 @@ class CandidateReranker(nn.Module):
         # match object nouns to regions; position words ("left", "top-most")
         # barely register in them. Trainable word embeddings give the
         # re-ranker a direct handle on every word.
-        self.word_embed = nn.Embedding(self.config.vocab_size, d, padding_idx=0)
+        word_dim = self.config.word_dim or d
+        self.word_embed = nn.Embedding(self.config.vocab_size, word_dim, padding_idx=0)
+        self.word_proj = nn.Linear(word_dim, d) if word_dim != d else nn.Identity()
         self.pos_embed = nn.Embedding(self.config.max_text_tokens, d)
+        # Optional self-attention over the expression, so relational phrases
+        # ("closest to the green area") are read as a unit before matching.
+        self.text_encoder = None
+        if self.config.text_layers > 0:
+            text_layer = nn.TransformerEncoderLayer(
+                d_model=d, nhead=self.config.num_heads, dim_feedforward=4 * d,
+                dropout=self.config.dropout, batch_first=True, norm_first=True,
+            )
+            self.text_encoder = nn.TransformerEncoder(text_layer, self.config.text_layers)
         self.cand_proj = nn.Sequential(
             nn.Linear(2 * feature_dim + d, d), nn.GELU(), nn.Linear(d, d), nn.LayerNorm(d),
         )
@@ -212,7 +223,10 @@ class CandidateReranker(nn.Module):
         boxes = inputs["boxes"]
         ids = inputs["input_ids"]
         positions = torch.arange(ids.shape[1], device=ids.device)
-        text = self.text_proj(inputs["text"]) + self.word_embed(ids) + self.pos_embed(positions)
+        text = (self.text_proj(inputs["text"]) + self.word_proj(self.word_embed(ids))
+                + self.pos_embed(positions))
+        if self.text_encoder is not None:
+            text = self.text_encoder(text, src_key_padding_mask=~text_mask)
 
         # What each candidate matched in the expression, as a text summary.
         weights = inputs["tok_logits"].masked_fill(~text_mask.unsqueeze(1), -1e4).softmax(-1)
@@ -321,9 +335,145 @@ def load_reranker(path: str, device: str) -> CandidateReranker:
     return model.to(device).eval()
 
 
+# Words that trade places when the image is mirrored. Each is a single BERT
+# token, and suffixes ("left" + "##most") carry over unchanged.
+HORIZONTAL_SWAPS = [("left", "right"), ("west", "east"), ("western", "eastern")]
+VERTICAL_SWAPS = [("top", "bottom"), ("upper", "lower"), ("north", "south"),
+                  ("northern", "southern")]
+
+
+def swap_table(pairs: list[tuple[str, str]], vocab_size: int) -> torch.Tensor:
+    """Token-id lookup that maps each word in `pairs` to its partner."""
+    from transformers import AutoProcessor
+
+    tokenizer = AutoProcessor.from_pretrained("IDEA-Research/grounding-dino-tiny").tokenizer
+    table = torch.arange(vocab_size)
+    for a, b in pairs:
+        ia, ib = tokenizer.convert_tokens_to_ids([a, b])
+        table[ia], table[ib] = ib, ia
+    return table
+
+
+def mirror(
+    inputs: dict[str, torch.Tensor], horizontal: bool, vertical: bool,
+    tables: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """The same candidates and expression, as if the image were mirrored.
+
+    Boxes flip and the expression's position words swap ("left" <-> "right"),
+    so the correct candidate stays correct. Used for training augmentation and
+    test-time augmentation.
+    """
+    boxes, ids = inputs["boxes"].clone(), inputs["input_ids"]
+    for axis, on in (("h", horizontal), ("v", vertical)):
+        if not on:
+            continue
+        coord = 0 if axis == "h" else 1
+        boxes[..., coord] = torch.where(inputs["cand_mask"], 1 - boxes[..., coord], boxes[..., coord])
+        ids = tables[axis].to(ids.device)[ids]
+    return {**inputs, "boxes": boxes, "input_ids": ids}
+
+
+MIRROR_VIEWS = ((False, False), (True, False), (False, True), (True, True))
+
+
+class RerankerEnsemble:
+    """Averages several re-rankers over mirrored views, then fuses boxes.
+
+    Three inference-time improvements, each measured on the VRSBench eval set:
+      - averaging re-rankers trained from different seeds;
+      - test-time augmentation: scoring the candidates as seen in the image
+        and in its three mirror images;
+      - box fusion: the chosen box is averaged with overlapping candidates,
+        weighted by probability. 43% of wrong picks were the right object with
+        the wrong extent, where a second, differently sized candidate covered
+        it; averaging the two usually lands closer to the labelled box.
+    """
+
+    def __init__(
+        self, models: list[CandidateReranker], tta: bool = True, fuse_iou: float | None = 0.3,
+    ) -> None:
+        if not models:
+            raise ValueError("RerankerEnsemble needs at least one re-ranker")
+        self.models = models
+        self.config = models[0].config
+        self.tta = tta
+        self.fuse_iou = fuse_iou
+        self.detector_checkpoint = getattr(models[0], "detector_checkpoint", None)
+        self._tables: dict[str, torch.Tensor] | None = None
+
+    @torch.no_grad()
+    def probabilities(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Mean candidate probabilities over models and views. (B, K)"""
+        views = MIRROR_VIEWS if self.tta else MIRROR_VIEWS[:1]
+        if self.tta and self._tables is None:
+            vocab = self.config.vocab_size
+            self._tables = {"h": swap_table(HORIZONTAL_SWAPS, vocab),
+                            "v": swap_table(VERTICAL_SWAPS, vocab)}
+        total = 0.0
+        for model in self.models:
+            for h, v in views:
+                view = mirror(inputs, h, v, self._tables) if (h or v) else inputs
+                total = total + model(view)[0].softmax(-1)
+        return total / (len(self.models) * len(views))
+
+    @torch.no_grad()
+    def fuse(self, boxes: torch.Tensor, probs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Each candidate's box averaged with the candidates overlapping it. (B, K, 4) cxcywh"""
+        if self.fuse_iou is None:
+            return boxes
+        xyxy = box_convert(boxes, "cxcywh", "xyxy")
+        lt = torch.max(xyxy[:, :, None, :2], xyxy[:, None, :, :2])
+        rb = torch.min(xyxy[:, :, None, 2:], xyxy[:, None, :, 2:])
+        inter = (rb - lt).clamp(min=0).prod(-1)
+        area = (xyxy[..., 2:] - xyxy[..., :2]).prod(-1)
+        iou = inter / (area[:, :, None] + area[:, None, :] - inter).clamp(min=1e-6)
+        weights = probs[:, None, :] * (iou >= self.fuse_iou) * mask[:, None, :]   # (B, K, K)
+        fused = (weights.unsqueeze(-1) * xyxy[:, None]).sum(2)
+        fused = fused / weights.sum(2, keepdim=True).clamp(min=1e-9)
+        return box_convert(fused, "xyxy", "cxcywh")
+
+    @torch.no_grad()
+    def select(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Candidates in ranked order: 'order', 'probs', 'boxes' (cxcywh, fused)."""
+        probs = self.probabilities(inputs)
+        boxes = self.fuse(inputs["boxes"], probs, inputs["cand_mask"])
+        order = probs.argsort(dim=-1, descending=True)
+        return {
+            "order": order,
+            "probs": probs.gather(1, order),
+            "boxes": boxes.gather(1, order.unsqueeze(-1).expand(-1, -1, 4)),
+        }
+
+
+def load_reranker_ensemble(
+    paths: str | list[str], device: str, tta: bool = True, fuse_iou: float | None = 0.3,
+) -> RerankerEnsemble:
+    """Load one or more train_rerank.py checkpoints as an ensemble.
+
+    Paths may be glob patterns ("checkpoints/grounding/reranker*.pt"), which
+    are expanded here because PowerShell does not expand them for Python.
+    """
+    import glob
+
+    paths = [paths] if isinstance(paths, str) else list(paths)
+    expanded = []
+    for pattern in paths:
+        matches = sorted(glob.glob(pattern)) if any(c in pattern for c in "*?[") else [pattern]
+        if not matches:
+            raise FileNotFoundError(f"No re-ranker checkpoints match {pattern}")
+        expanded.extend(matches)
+    paths = expanded
+    models = [load_reranker(p, device) for p in paths]
+    for model, path in zip(models[1:], paths[1:]):
+        if model.detector_checkpoint != models[0].detector_checkpoint:
+            raise ValueError(f"{path} was trained on a different detector's candidates")
+    return RerankerEnsemble(models, tta=tta, fuse_iou=fuse_iou)
+
+
 @torch.no_grad()
 def rerank_outputs(
-    reranker: CandidateReranker,
+    reranker: RerankerEnsemble | CandidateReranker,
     outputs,
     pixel_values: torch.Tensor,
     input_ids: torch.Tensor,

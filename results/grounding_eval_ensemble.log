@@ -1,0 +1,88 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Device: cuda  |  precision: torch.bfloat16  |  image size: 512
+  Loading VRSBench annotations from xiang709/VRSBench/VRSBench_EVAL_referring.json...
+  Using existing extracted images: data\vrsbench\extracted\validation
+  VRSBench grounding [validation]: 16146 samples loaded
+Loading weights:   0%|          | 0/978 [00:00<?, ?it/s]Loading weights: 100%|##########| 978/978 [00:00<00:00, 12392.35it/s]
+  Froze 197 text encoder parameters
+Loaded checkpoints/grounding/best.pt (epoch 5) + 5 re-ranker(s)
+
+  [400/16146] 7.4 samples/s, ~35 min left
+  [800/16146] 8.1 samples/s, ~32 min left
+  [1200/16146] 8.3 samples/s, ~30 min left
+  [1600/16146] 8.4 samples/s, ~29 min left
+  [2000/16146] 8.5 samples/s, ~28 min left
+  [2400/16146] 8.6 samples/s, ~27 min left
+  [2800/16146] 8.6 samples/s, ~26 min left
+  [3200/16146] 8.7 samples/s, ~25 min left
+  [3600/16146] 8.7 samples/s, ~24 min left
+  [4000/16146] 8.7 samples/s, ~23 min left
+  [4400/16146] 8.7 samples/s, ~22 min left
+  [4800/16146] 8.7 samples/s, ~22 min left
+  [5200/16146] 8.7 samples/s, ~21 min left
+  [5600/16146] 8.8 samples/s, ~20 min left
+  [6000/16146] 8.8 samples/s, ~19 min left
+  [6400/16146] 8.8 samples/s, ~19 min left
+  [6800/16146] 8.8 samples/s, ~18 min left
+  [7200/16146] 8.8 samples/s, ~17 min left
+  [7600/16146] 8.8 samples/s, ~16 min left
+  [8000/16146] 8.8 samples/s, ~15 min left
+  [8400/16146] 8.8 samples/s, ~15 min left
+  [8800/16146] 8.8 samples/s, ~14 min left
+  [9200/16146] 8.8 samples/s, ~13 min left
+  [9600/16146] 8.8 samples/s, ~12 min left
+  [10000/16146] 8.8 samples/s, ~12 min left
+  [10400/16146] 8.8 samples/s, ~11 min left
+  [10800/16146] 8.8 samples/s, ~10 min left
+  [11200/16146] 8.8 samples/s, ~9 min left
+  [11600/16146] 8.8 samples/s, ~9 min left
+  [12000/16146] 8.8 samples/s, ~8 min left
+  [12400/16146] 8.8 samples/s, ~7 min left
+  [12800/16146] 8.8 samples/s, ~6 min left
+  [13200/16146] 8.8 samples/s, ~6 min left
+  [13600/16146] 8.8 samples/s, ~5 min left
+  [14000/16146] 8.8 samples/s, ~4 min left
+  [14400/16146] 8.8 samples/s, ~3 min left
+  [14800/16146] 8.8 samples/s, ~3 min left
+  [15200/16146] 8.8 samples/s, ~2 min left
+  [15600/16146] 8.8 samples/s, ~1 min left
+  [16000/16146] 8.8 samples/s, ~0 min left
+
+======================================================================
+  VRSBench grounding accuracy — checkpoints/grounding/best.pt (epoch 5) + 5 re-ranker(s)
+======================================================================
+  subset               count   Acc@0.5   Acc@0.7    mIoU
+  all                  16146     67.5%     44.1%   0.557
+  unique                6732     69.8%     42.9%   0.578
+  non_unique            9414     65.9%     44.9%   0.542
+
+  per class
+  subset               count   Acc@0.5   Acc@0.7    mIoU
+  vehicle               4537     63.4%     36.2%   0.496
+  ship                  1687     69.9%     49.4%   0.560
+  airplane              1461     76.7%     47.2%   0.612
+  tennis-court          1132     87.2%     85.0%   0.788
+  harbor                1090     68.7%     39.3%   0.556
+  bridge                 844     43.2%     17.7%   0.402
+  storage-tank           764     85.1%     73.0%   0.694
+  baseball-diamond       712     80.2%     64.2%   0.669
+  windmill               529     50.1%     22.3%   0.460
+  ground-track-field     446     78.0%     45.7%   0.602
+  overpass               419     58.9%     32.0%   0.502
+  basketball-court       345     62.3%     53.3%   0.556
+  swimming-pool          268     67.2%     35.4%   0.519
+  stadium                248     81.0%     45.6%   0.661
+  expressway-service-area     234     51.7%     26.9%   0.481
+  trainstation           216     46.3%     23.6%   0.459
+  airport                195     42.1%     10.8%   0.433
+  roundabout             195     75.4%     48.7%   0.594
+  chimney                170     79.4%     60.6%   0.661
+  expressway-toll-station     170     67.1%     52.9%   0.566
+  soccer-ball-field      148     50.0%     33.8%   0.479
+  dam                    146     50.7%     20.5%   0.479
+  golffield              121     43.0%     23.1%   0.430
+  helicopter              56     69.6%     30.4%   0.541
+  container-crane         12     41.7%     25.0%   0.351
+  helipad                  1      0.0%      0.0%   0.129
+======================================================================
+Results written to results\grounding_reranked_ensemble_full.json
