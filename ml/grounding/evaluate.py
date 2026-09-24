@@ -19,6 +19,10 @@ Usage:
     # Quick check on a subset, saving per-sample results
     python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt \
         --max-samples 1000 --output results.json
+
+    # Two-stage: GroundingDINO candidates chosen between by the re-ranker
+    python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt \
+        --reranker checkpoints/grounding/reranker.pt
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from ml.grounding.config import ModelConfig, TrainConfig
 from ml.grounding.dataset import VRSBenchGroundingDataset, collate_fn
 from ml.grounding.model import GroundingModel
+from ml.grounding.rerank import CandidateReranker, load_reranker, rerank_outputs
 from ml.grounding.train import resolve_amp
 from ml.grounding.transforms import prepare_training_batch
 
@@ -90,8 +95,13 @@ def predict(
     num_workers: int,
     image_size: int,
     amp_dtype: torch.dtype,
+    reranker: CandidateReranker | None = None,
 ) -> list[dict]:
-    """Run the model over the dataset and score its top-1 box per expression."""
+    """Run the model over the dataset and score its top-1 box per expression.
+
+    With a re-ranker, the top-1 box is the re-ranker's pick among
+    GroundingDINO's candidates rather than GroundingDINO's most confident query.
+    """
     grounding.model.eval()
     loader = DataLoader(
         _Indexed(dataset),
@@ -120,10 +130,17 @@ def predict(
         # Each of the 900 queries scores against every text token; padded
         # tokens are -inf. A query's confidence is its best token, and the
         # prediction for the expression is the most confident query's box.
-        scores = outputs.logits.float().sigmoid().max(dim=-1).values   # (B, Q)
-        best_score, best_query = scores.max(dim=-1)                     # (B,)
-        rows = torch.arange(len(best_query), device=best_query.device)
-        pred_boxes = outputs.pred_boxes.float()[rows, best_query]       # (B, 4) cxcywh
+        if reranker is not None:
+            picked = rerank_outputs(
+                reranker, outputs, inputs["pixel_values"], inputs["attention_mask"],
+            )
+            best_score = picked["probs"][:, 0]
+            pred_boxes = picked["boxes"][:, 0]
+        else:
+            scores = outputs.logits.float().sigmoid().max(dim=-1).values   # (B, Q)
+            best_score, best_query = scores.max(dim=-1)                     # (B,)
+            rows = torch.arange(len(best_query), device=best_query.device)
+            pred_boxes = outputs.pred_boxes.float()[rows, best_query]       # (B, 4) cxcywh
 
         # IoU is unchanged by scaling each axis, so normalized coordinates
         # give the same value as pixel coordinates.
@@ -203,6 +220,9 @@ def main() -> None:
     source.add_argument("--checkpoint", type=str, help="Fine-tuned .pt checkpoint")
     source.add_argument("--pretrained", action="store_true",
                         help="Evaluate the zero-shot pre-trained model")
+    parser.add_argument("--reranker", type=str, default=None,
+                        help="Re-ranker .pt from train_rerank.py; picks among the "
+                             "checkpoint's candidates")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--image-size", type=int, default=None,
@@ -248,10 +268,20 @@ def main() -> None:
 
     grounding, model_name = load_model(None if args.pretrained else args.checkpoint)
     grounding.model.to(device)
+    reranker = None
+    if args.reranker:
+        if args.pretrained:
+            parser.error("--reranker needs the --checkpoint it was trained on")
+        reranker = load_reranker(args.reranker, device)
+        trained_on = reranker.detector_checkpoint
+        if trained_on and Path(trained_on).resolve() != Path(args.checkpoint).resolve():
+            print(f"  Warning: re-ranker was trained on candidates from {trained_on}")
+        model_name += f" + re-ranker {args.reranker}"
     print(f"Loaded {model_name}\n")
 
     records = predict(
         grounding, dataset, device, args.batch_size, num_workers, image_size, amp_dtype,
+        reranker=reranker,
     )
     summary = summarize(records)
     print_summary(summary, model_name)

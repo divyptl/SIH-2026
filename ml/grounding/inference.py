@@ -13,6 +13,12 @@ Usage:
     # From fine-tuned checkpoint
     model = GroundingInference.from_checkpoint("checkpoints/grounding/best.pt")
 
+    # Two-stage: fine-tuned GroundingDINO + candidate re-ranker (most accurate)
+    model = GroundingInference.from_checkpoint(
+        "checkpoints/grounding/best.pt",
+        reranker_path="checkpoints/grounding/reranker.pt",
+    )
+
     # Or zero-shot pre-trained
     model = GroundingInference.from_pretrained()
 
@@ -38,8 +44,9 @@ except ImportError:
     ImageDraw = None
     ImageFont = None
 
-from ml.grounding.config import ModelConfig
+from ml.grounding.config import ModelConfig, TrainConfig
 from ml.grounding.model import GroundingModel
+from ml.grounding.rerank import CandidateReranker, load_reranker, rerank_outputs
 
 
 class GroundingInference:
@@ -48,17 +55,21 @@ class GroundingInference:
     Args:
         grounding: The GroundingModel instance.
         device: Device to run inference on.
+        reranker: Optional second stage that picks the referred object among
+            GroundingDINO's candidates (see ml/grounding/rerank.py).
     """
 
     def __init__(
         self,
         grounding: GroundingModel,
         device: str = "cpu",
+        reranker: CandidateReranker | None = None,
     ) -> None:
         self.grounding = grounding
         self.grounding.model.to(device)
         self.grounding.model.eval()
         self.device = device
+        self.reranker = reranker.to(device).eval() if reranker is not None else None
 
     @classmethod
     def from_pretrained(
@@ -98,12 +109,16 @@ class GroundingInference:
         cls,
         checkpoint_path: str,
         device: str = "auto",
+        reranker_path: str | None = None,
     ) -> "GroundingInference":
         """Load a fine-tuned model from a training checkpoint.
 
         Args:
             checkpoint_path: Path to the .pt checkpoint file.
             device: Target device.
+            reranker_path: Re-ranker trained on this checkpoint's candidates
+                (train_rerank.py). Without it, the top box is GroundingDINO's
+                most confident query.
 
         Returns:
             GroundingInference ready for inference.
@@ -130,7 +145,12 @@ class GroundingInference:
             loss = ckpt["metrics"].get("val_loss", ckpt["metrics"].get("loss", "N/A"))
             print(f"  Checkpoint loss: {loss}")
 
-        return cls(grounding=grounding, device=device)
+        reranker = None
+        if reranker_path:
+            reranker = load_reranker(reranker_path, device)
+            print(f"Loaded candidate re-ranker from {reranker_path}")
+
+        return cls(grounding=grounding, device=device, reranker=reranker)
 
     # ── Core inference ───────────────────────────────────────────────────
 
@@ -157,8 +177,14 @@ class GroundingInference:
                 'box': [x1, y1, x2, y2] in pixel coordinates
                 'score': float confidence
                 'label': str matched text span
+
+            With a re-ranker, the list is ordered by the re-ranker: the first
+            entry is always its pick for the referred object, followed by any
+            other candidates it scores at or above `box_threshold`.
         """
         pil_image = self._load_image(image)
+        if self.reranker is not None:
+            return self._ground_reranked(pil_image, text_query, box_threshold)
         w, h = pil_image.size
 
         # Ensure the query ends with a period (GroundingDINO convention)
@@ -203,6 +229,48 @@ class GroundingInference:
                     "label": str(label).strip(),
                 })
 
+        return detections
+
+    @torch.no_grad()
+    def _ground_reranked(
+        self, pil_image, text_query: str, box_threshold: float | None,
+    ) -> list[dict]:
+        """Two-stage grounding: GroundingDINO candidates, re-ranker picks."""
+        w, h = pil_image.size
+
+        # Same prompt and resolution as the candidates the re-ranker trained on
+        prompt = text_query.strip().lower()
+        if not prompt.endswith("."):
+            prompt += "."
+        size = TrainConfig.image_size
+        inputs = self.grounding.processor(
+            images=pil_image, text=prompt, return_tensors="pt",
+            size={"shortest_edge": size, "longest_edge": size},
+        )
+        inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                  for k, v in inputs.items()}
+        outputs = self.grounding(**inputs)
+
+        picked = rerank_outputs(
+            self.reranker, outputs, inputs["pixel_values"], inputs["attention_mask"],
+        )
+        threshold = box_threshold or self.grounding.config.box_threshold
+        scale = torch.tensor([w, h, w, h], device=self.device)
+
+        detections = []
+        for rank, (box, prob, valid) in enumerate(zip(
+            picked["boxes"][0], picked["probs"][0], picked["valid"][0],
+        )):
+            if not valid or (rank > 0 and prob < threshold):
+                continue
+            cx, cy, bw, bh = box.tolist()
+            xyxy = torch.tensor([cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2],
+                                device=self.device).clamp(0, 1) * scale
+            detections.append({
+                "box": [round(float(c), 2) for c in xyxy],
+                "score": round(float(prob), 4),
+                "label": text_query.strip(),
+            })
         return detections
 
     @torch.no_grad()
@@ -360,6 +428,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run grounding inference")
     parser.add_argument("--checkpoint", default=None, help="Path to fine-tuned .pt checkpoint")
     parser.add_argument("--pretrained", action="store_true", help="Use zero-shot pre-trained model")
+    parser.add_argument("--reranker", default=None,
+                        help="Re-ranker .pt trained on --checkpoint's candidates")
     parser.add_argument("--image", required=True, help="Path to satellite image")
     parser.add_argument("--query", required=True, help="Text query (e.g. 'buildings near road')")
     parser.add_argument("--box-threshold", type=float, default=0.25)
@@ -370,7 +440,9 @@ if __name__ == "__main__":
 
     # Load model
     if args.checkpoint:
-        model = GroundingInference.from_checkpoint(args.checkpoint, device=args.device)
+        model = GroundingInference.from_checkpoint(
+            args.checkpoint, device=args.device, reranker_path=args.reranker,
+        )
     elif args.pretrained:
         model = GroundingInference.from_pretrained(device=args.device)
     else:

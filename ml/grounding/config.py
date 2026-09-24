@@ -124,3 +124,37 @@ class TrainConfig:
                 return "mps"
             return "cpu"
         return self.device
+
+
+@dataclass
+class RerankConfig:
+    """Second-stage candidate re-ranker (see ml/grounding/rerank.py).
+
+    GroundingDINO finds the referred object among its top-10 boxes ~85% of the
+    time but ranks it first only ~50% of the time, so a model that compares the
+    candidates against the full expression recovers most of that gap.
+    """
+
+    # Candidate extraction from the frozen GroundingDINO
+    cache_k: int = 20                   # Candidates stored per expression
+    num_candidates: int = 10            # Candidates the re-ranker chooses among
+    nms_iou: float = 0.5                # Collapse near-duplicate queries
+    max_text_tokens: int = 48           # Text features stored per expression
+    cache_dir: str = "data/vrsbench/rerank_cache"
+
+    # Architecture
+    d_model: int = 256
+    num_layers: int = 4
+    num_heads: int = 8
+    dropout: float = 0.1
+    refine_boxes: bool = True           # Also regress a correction to the chosen box
+
+    # Optimization (on cached features, so an epoch takes seconds)
+    epochs: int = 30
+    batch_size: int = 256
+    lr: float = 2e-4
+    weight_decay: float = 0.05
+    warmup_epochs: int = 1
+    min_iou: float = 0.5                # Candidate must reach this IoU to be a target
+    dev_fraction: float = 0.05          # Train images held out for model selection
+    checkpoint: str = "checkpoints/grounding/reranker.pt"

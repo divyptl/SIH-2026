@@ -134,6 +134,52 @@ def test_config():
     print("  ✓ Config tests passed")
 
 
+def test_reranker():
+    """Test the candidate re-ranker on synthetic candidates (no download)."""
+    import torch
+
+    from ml.grounding.config import RerankConfig
+    from ml.grounding.rerank import CandidateReranker, _pairwise_rank, rerank_loss
+
+    # Rank features: 0 for the smallest valid value, 1 for the largest,
+    # padding ignored.
+    values = torch.tensor([[0.9, 0.1, 0.5, 0.0]])
+    mask = torch.tensor([[True, True, True, False]])
+    ranks = _pairwise_rank(values, mask)[0, :3].tolist()
+    assert ranks == [1.0, 0.0, 0.5], ranks
+
+    b, k, t = 3, 10, 12
+    torch.manual_seed(0)
+    inputs = {
+        "hidden": torch.randn(b, k, 256),
+        "roi": torch.randn(b, k, 256),
+        "boxes": torch.rand(b, k, 4) * 0.4 + 0.1,
+        "scores": torch.rand(b, k),
+        "cand_mask": torch.ones(b, k, dtype=torch.bool),
+        "tok_logits": torch.randn(b, k, t),
+        "text": torch.randn(b, t, 256),
+        "text_mask": torch.ones(b, t, dtype=torch.bool),
+    }
+    inputs["cand_mask"][0, 6:] = False
+    inputs["text_mask"][1, 8:] = False
+
+    model = CandidateReranker(RerankConfig(num_layers=2))
+    logits, refined = model(inputs)
+    assert logits.shape == (b, k) and refined.shape == (b, k, 4)
+    assert torch.isinf(logits[0, 6:]).all(), "Padding candidates must never be picked"
+    assert torch.isfinite(logits[0, :6]).all()
+
+    # Target = candidate 2 exactly, so every sample has a positive.
+    gt = inputs["boxes"][:, 2].clone()
+    loss, stats = rerank_loss(logits, refined, inputs, gt, min_iou=0.5, refine=True)
+    loss.backward()
+    assert torch.isfinite(loss) and {"rank", "l1", "giou"} <= stats.keys()
+
+    picked = model.select(inputs)
+    assert picked["order"][0, 0] < 6
+    print("  ✓ Re-ranker tests passed")
+
+
 def test_model_loading():
     """Test that GroundingDINO loads and produces valid outputs."""
     import torch
@@ -169,6 +215,17 @@ def test_model_loading():
     assert outputs.logits is not None
     assert outputs.pred_boxes.shape[-1] == 4  # (B, num_queries, 4)
     print(f"  Output shapes: boxes={outputs.pred_boxes.shape}, logits={outputs.logits.shape}")
+
+    from ml.grounding.rerank import extract_candidates
+    cands = extract_candidates(
+        outputs, inputs["pixel_values"], inputs["attention_mask"],
+        k=10, nms_iou=0.5, max_text_tokens=48,
+    )
+    assert cands["hidden"].shape == (1, 10, 256)
+    assert cands["roi"].abs().sum() > 0, "RoI features should be pooled from the encoder"
+    assert cands["cand_mask"].all()
+    assert cands["text_mask"][0].sum() == inputs["attention_mask"][0].sum()
+    print("  Candidate extraction OK")
 
     print("  ✓ Model loading tests passed")
 
@@ -217,6 +274,7 @@ def main():
     test_config()
     test_box_parsing()
     test_transforms()
+    test_reranker()
 
     # These tests download the model (~700MB first time)
     print("\n  [Model tests require downloading GroundingDINO-Tiny]")
