@@ -24,7 +24,7 @@ class ModelConfig:
     projection_hidden: int = 1024       # Increased from 512. Wider MLP improves contrastive learning (SimCLR trick)
 
     # Self-Attention Transformer
-    use_attention: bool = True           # Enable Self-Attention blocks after backbone
+    use_attention: bool = False          # DISABLED: The un-pretrained transformer is memorizing the training set!
     attn_dim: int = 512                  # Internal attention dimension (projected from backbone)
     attn_heads: int = 8                  # Number of attention heads
     attn_layers: int = 2                 # Number of Transformer encoder layers
