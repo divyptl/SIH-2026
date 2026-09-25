@@ -134,6 +134,19 @@ def test_config():
     print("  ✓ Config tests passed")
 
 
+def test_dior_photo_ids():
+    """Photo ids must match across VRSBench and DIOR-RSVG naming, or overlap
+    filtering silently lets the other benchmark's test photos into training."""
+    from ml.grounding.sources import dior_photo_id
+
+    assert dior_photo_id("05863_0000.png") == "05863"      # VRSBench crop of a DIOR photo
+    assert dior_photo_id("05863.jpg") == "05863"           # DIOR-RSVG
+    assert dior_photo_id("images/05863.jpg") == "05863"    # paths are reduced to names
+    assert dior_photo_id("P0003_0002.png") is None         # VRSBench DOTA image
+    assert dior_photo_id("05863.png") is None              # neither naming scheme
+    print("  ✓ DIOR photo id tests passed")
+
+
 def test_reranker():
     """Test the candidate re-ranker on synthetic candidates (no download)."""
     import torch
@@ -275,6 +288,7 @@ def main():
     test_config()
     test_box_parsing()
     test_transforms()
+    test_dior_photo_ids()
     test_reranker()
 
     # These tests download the model (~700MB first time)

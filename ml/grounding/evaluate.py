@@ -1,5 +1,5 @@
 """
-Accuracy evaluation for the grounding model on VRSBench.
+Accuracy evaluation for the grounding model on VRSBench or DIOR-RSVG.
 
 Reports the metrics VRSBench uses for visual grounding: the share of referring
 expressions whose top-scoring predicted box overlaps the ground-truth box at
@@ -28,6 +28,10 @@ Usage:
     # test-time flips and box fusion
     python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt \
         --reranker checkpoints/grounding/reranker*.pt
+
+    # DIOR-RSVG test split (unique/non-unique does not apply there)
+    python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt \
+        --dataset dior_rsvg --reranker checkpoints/grounding/reranker*.pt
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from ml.grounding.config import ModelConfig, TrainConfig
 from ml.grounding.dataset import VRSBenchGroundingDataset, collate_fn
+from ml.grounding.dior_rsvg import DIORRSVGDataset
 from ml.grounding.model import GroundingModel
 from ml.grounding.rerank import RerankerEnsemble, load_reranker_ensemble, rerank_outputs
 from ml.grounding.train import resolve_amp
@@ -200,9 +205,9 @@ def summarize(records: list[dict]) -> dict:
     }
 
 
-def print_summary(summary: dict, model_name: str) -> None:
+def print_summary(summary: dict, model_name: str, benchmark: str = "VRSBench") -> None:
     print("\n" + "=" * 70)
-    print(f"  VRSBench grounding accuracy — {model_name}")
+    print(f"  {benchmark} grounding accuracy — {model_name}")
     print("=" * 70)
     header = f"  {'subset':<18}{'count':>8}{'Acc@0.5':>10}{'Acc@0.7':>10}{'mIoU':>8}"
     print(header)
@@ -221,7 +226,7 @@ def print_summary(summary: dict, model_name: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate grounding accuracy on VRSBench")
+    parser = argparse.ArgumentParser(description="Evaluate grounding accuracy")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--checkpoint", type=str, help="Fine-tuned .pt checkpoint")
     source.add_argument("--pretrained", action="store_true",
@@ -233,6 +238,9 @@ def main() -> None:
                         help="Re-ranker: skip the mirrored test-time views")
     parser.add_argument("--no-fuse", action="store_true",
                         help="Re-ranker: return the chosen candidate's box unfused")
+    parser.add_argument("--dataset", choices=["vrsbench", "dior_rsvg"], default="vrsbench")
+    parser.add_argument("--split", default=None,
+                        help="Default: VRSBench's eval file, or DIOR-RSVG's test split")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--image-size", type=int, default=None,
@@ -262,13 +270,18 @@ def main() -> None:
 
     print(f"Device: {device}  |  precision: {amp_dtype}  |  image size: {image_size}")
 
-    dataset = VRSBenchGroundingDataset(
-        split="validation",
-        cache_dir=train_cfg.data_cache_dir,
-        image_dir=args.image_dir,
-        annotations_file=args.annotations,
-        image_zip=args.image_zip,
-    )
+    if args.dataset == "vrsbench":
+        benchmark = "VRSBench"
+        dataset = VRSBenchGroundingDataset(
+            split=args.split or "validation",
+            cache_dir=train_cfg.data_cache_dir,
+            image_dir=args.image_dir,
+            annotations_file=args.annotations,
+            image_zip=args.image_zip,
+        )
+    else:
+        benchmark = f"DIOR-RSVG {args.split or 'test'}"
+        dataset = DIORRSVGDataset(args.split or "test")
     if args.max_samples and args.max_samples < len(dataset):
         # The file is ordered by image, so a leading slice covers only a few
         # scenes and classes. Take evenly spaced expressions instead.
@@ -297,7 +310,7 @@ def main() -> None:
         reranker=reranker,
     )
     summary = summarize(records)
-    print_summary(summary, model_name)
+    print_summary(summary, model_name, benchmark)
 
     if args.output:
         out = Path(args.output)

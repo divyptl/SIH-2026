@@ -8,6 +8,13 @@ arrays, so the re-ranker trains on features instead of re-running the detector.
 Usage:
     python -m ml.grounding.build_rerank_cache --checkpoint checkpoints/grounding/best.pt --split train
     python -m ml.grounding.build_rerank_cache --checkpoint checkpoints/grounding/best.pt --split validation
+    python -m ml.grounding.build_rerank_cache --checkpoint checkpoints/grounding/best.pt --dataset dior_rsvg --split train
+    python -m ml.grounding.build_rerank_cache --checkpoint checkpoints/grounding/best.pt --dataset dior_rsvg --split test
+
+Caches are written to <cache_dir>/<name>, where <name> is the split for VRSBench
+("train", "validation") and "dior_rsvg_<split>" for DIOR-RSVG. Training splits
+drop photos that sit in the other benchmark's evaluation split (see
+ml/grounding/sources.py), matching how the detector was trained.
 
 Roughly 20 samples/s on a laptop RTX 5070 Ti: about 30 minutes for train
 (~36K expressions) and 15 minutes for validation (~16K).
@@ -33,9 +40,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from ml.grounding.config import RerankConfig, TrainConfig
-from ml.grounding.dataset import VRSBenchGroundingDataset
 from ml.grounding.evaluate import _collate, _Indexed, load_model
 from ml.grounding.rerank import extract_candidates
+from ml.grounding.sources import DATASETS, load_split
 from ml.grounding.train import resolve_amp
 from ml.grounding.transforms import prepare_training_batch
 
@@ -53,25 +60,20 @@ FEATURES = {
 }
 
 
-def load_split(split: str, cfg: TrainConfig) -> VRSBenchGroundingDataset:
-    """Load a split the same way training and evaluation do."""
-    return VRSBenchGroundingDataset(
-        data_name=cfg.data_name,
-        split=split,
-        cache_dir=cfg.data_cache_dir,
-        image_dir=cfg.image_dir,
-        download_images=cfg.download_images,
-        auto_extract_zip=cfg.auto_extract_zip,
-        extracted_image_dir=cfg.extracted_image_dir if split == "train" else None,
-        annotations_file=cfg.annotations_file if split == "train" else cfg.val_annotations_file,
-        image_zip=cfg.image_zip if split == "train" else cfg.val_image_zip,
-    )
+SPLITS = {"vrsbench": ("train", "validation"), "dior_rsvg": ("train", "val", "test")}
+
+
+def cache_name(dataset: str, split: str) -> str:
+    """Folder name of a cache: VRSBench keeps its bare split names."""
+    return split if dataset == "vrsbench" else f"{dataset}_{split}"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Cache GroundingDINO candidates for the re-ranker")
     parser.add_argument("--checkpoint", required=True, help="Fine-tuned GroundingDINO .pt")
-    parser.add_argument("--split", choices=["train", "validation"], required=True)
+    parser.add_argument("--dataset", choices=DATASETS, default="vrsbench")
+    parser.add_argument("--split", required=True,
+                        help="vrsbench: train | validation;  dior_rsvg: train | val | test")
     parser.add_argument("--out-dir", default=None, help="Default: RerankConfig.cache_dir")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -82,10 +84,12 @@ def main() -> None:
     tcfg = TrainConfig()
     device = tcfg.resolve_device()
     _, amp_dtype = resolve_amp(device, True)
-    out_dir = Path(args.out_dir or rcfg.cache_dir) / args.split
+    if args.split not in SPLITS[args.dataset]:
+        parser.error(f"--split for {args.dataset} must be one of {SPLITS[args.dataset]}")
+    out_dir = Path(args.out_dir or rcfg.cache_dir) / cache_name(args.dataset, args.split)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = load_split(args.split, tcfg)
+    dataset = load_split(args.dataset, args.split, tcfg)
     if args.max_samples and args.max_samples < len(dataset):
         stride = len(dataset) / args.max_samples
         dataset.samples = [dataset.samples[int(i * stride)] for i in range(args.max_samples)]
@@ -158,6 +162,7 @@ def main() -> None:
     with open(out_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump({
             "checkpoint": args.checkpoint,
+            "dataset": args.dataset,
             "split": args.split,
             "cache_k": k,
             "max_text_tokens": t,

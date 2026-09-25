@@ -17,6 +17,11 @@ Usage:
     # Reuse images you already extracted instead of downloading the archives:
     python -m ml.grounding.train --image-dir /data/VRSBench/Images_train
 
+    # VRSBench + DIOR-RSVG, starting from an existing detector's weights with a
+    # fresh learning-rate schedule (--resume would continue the old schedule):
+    python -m ml.grounding.train --datasets vrsbench dior_rsvg \
+        --init-from checkpoints/grounding/kaggle/last.pt --epochs 6
+
     # Several GPUs on one machine (e.g. Kaggle 2x T4): one process per GPU.
     # --batch-size is per GPU; the effective batch is
     # batch-size x grad-accum x number of GPUs.
@@ -64,8 +69,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from ml.grounding.config import ModelConfig, TrainConfig
-from ml.grounding.dataset import VRSBenchGroundingDataset, collate_fn
+from ml.grounding.dataset import collate_fn
 from ml.grounding.model import GroundingModel
+from ml.grounding.sources import DATASETS, load_split, load_training_set
 from ml.grounding.transforms import GroundingAugmentation, prepare_training_batch
 
 
@@ -447,7 +453,16 @@ def main() -> None:
                              "yourself; used for the validation split")
     parser.add_argument("--no-download-images", action="store_true",
                         help="Fail instead of downloading VRSBench image archives")
-    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--datasets", nargs="+", default=["vrsbench"], choices=DATASETS,
+                        help="Training data. Several are concatenated, with each one's "
+                             "photos that sit in the other benchmark's test split removed "
+                             "(see ml/grounding/sources.py). Validation stays on VRSBench.")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Continue an interrupted run: weights, optimizer, LR "
+                             "schedule and epoch counter")
+    parser.add_argument("--init-from", type=str, default=None,
+                        help="Start from a checkpoint's weights only, with a fresh "
+                             "optimizer and LR schedule (e.g. to fine-tune on new data)")
     parser.add_argument("--checkpoint-dir", type=str, default=None,
                         help="Where checkpoints and history.json go "
                              "(default checkpoints/grounding)")
@@ -552,7 +567,7 @@ def main() -> None:
     print(f"  Epochs:          {train_cfg.epochs}")
     print(f"  LR:              {train_cfg.lr}")
     print(f"  Device:          {device}")
-    print(f"  Dataset:         {train_cfg.data_name}")
+    print(f"  Datasets:        {', '.join(args.datasets)} (validation: vrsbench)")
     print(f"  Workers:         {train_cfg.num_workers}")
     print(f"  Augmentation:    {train_cfg.augment}")
     print(f"  Mixed precision: {amp_dtype if use_amp else 'off (fp32)'}")
@@ -568,29 +583,10 @@ def main() -> None:
     # files it wrote instead of racing it for the same archives.
     if not is_main:
         barrier(distributed)
-    train_ds = VRSBenchGroundingDataset(
-        data_name=train_cfg.data_name,
-        split="train",
-        cache_dir=train_cfg.data_cache_dir,
-        image_dir=train_cfg.image_dir,
-        download_images=train_cfg.download_images,
-        auto_extract_zip=train_cfg.auto_extract_zip,
-        extracted_image_dir=train_cfg.extracted_image_dir,
-        max_samples=args.max_samples,
-        annotations_file=train_cfg.annotations_file,
-        image_zip=train_cfg.image_zip,
-    )
-    val_ds = VRSBenchGroundingDataset(
-        data_name=train_cfg.data_name,
-        split="validation",
-        cache_dir=train_cfg.data_cache_dir,
-        image_dir=train_cfg.image_dir,
-        download_images=train_cfg.download_images,
-        auto_extract_zip=train_cfg.auto_extract_zip,
-        extracted_image_dir=train_cfg.extracted_image_dir,
+    train_ds = load_training_set(args.datasets, train_cfg, max_samples=args.max_samples)
+    val_ds = load_split(
+        "vrsbench", "validation", train_cfg,
         max_samples=args.max_samples // 5 if args.max_samples else None,
-        annotations_file=train_cfg.val_annotations_file,
-        image_zip=train_cfg.val_image_zip,
     )
 
     if is_main:
@@ -709,11 +705,20 @@ def main() -> None:
     start_epoch = 1
     best_val_loss = float("inf")
     history: list[dict] = []
+    if train_cfg.resume_from and args.init_from:
+        parser.error("--resume and --init-from are exclusive: resume continues a run, "
+                     "init-from starts a new one from its weights")
     if train_cfg.resume_from:
         last_epoch, history, best_val_loss = load_checkpoint(
             train_cfg.resume_from, grounding, optimizer, scheduler, device, scaler,
         )
         start_epoch = last_epoch + 1
+    elif args.init_from:
+        ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
+        grounding.model.load_state_dict(ckpt["model"])
+        print(f"  Initialized weights from {args.init_from} (epoch {ckpt.get('epoch', '?')}); "
+              f"optimizer and LR schedule start fresh")
+        del ckpt
 
     # ── Multi-GPU ──
     # Wrapped after resuming, so every process starts from the same weights.

@@ -9,7 +9,7 @@ It runs in **two stages**:
 1. **GroundingDINO**, an open-vocabulary detector fine-tuned on VRSBench, proposes the 10 most likely boxes.
 2. A small **candidate re-ranker** looks at all 10 together with the sentence and picks the one being described.
 
-Dataset: **VRSBench** — ~36K training expressions and 16,146 evaluation expressions over ~29K remote-sensing images.
+Datasets: **VRSBench** (~36K training expressions, 16,146 evaluation expressions over ~29K images; long, descriptive sentences) and **DIOR-RSVG** (27K train / 7.5K test expressions over 17.4K 800×800 photos; short expressions, the most widely reported remote-sensing grounding benchmark). See [Datasets](#datasets-and-combined-training).
 
 ---
 
@@ -23,8 +23,13 @@ VRSBench evaluation set, all 16,146 expressions. **Acc@0.5** = share of expressi
 | + re-ranker v1 | 54.9% | 37.8% | 0.474 | 60.5% | 50.8% |
 | + own word embeddings | 62.5% | 43.2% | 0.541 | 63.5% | 61.7% |
 | + flip augmentation | 64.8% | 44.9% | 0.554 | 65.8% | 64.0% |
-| **+ 5-model ensemble, test-time flips, box fusion (current)** | **67.5%** | **44.1%** | **0.557** | **69.8%** | **65.9%** |
-| *Ceiling: best of the 10 candidates* | *85.2%* | *58.5%* | *0.692* | *85.7%* | *84.8%* |
+| **+ 5-model ensemble, test-time flips, box fusion** | **67.5%** | **44.1%** | **0.557** | **69.8%** | **65.9%** |
+| Same, detector trained 10 more epochs (epoch 19, Kaggle) | 67.6% | 42.8% | 0.558 | 69.0% | 66.6% |
+| *Ceiling: best of the 10 candidates (epoch-5 detector)* | *85.2%* | *58.5%* | *0.692* | *85.7%* | *84.8%* |
+
+Training the detector longer changed almost nothing: its loss was flat from epoch 10 to 19, and the ceiling rose only to 86.3%.
+
+**DIOR-RSVG test** (1,000-expression subset), with the VRSBench-only model above, which has never seen DIOR-RSVG: detector alone 39.2%, with re-rankers **50.8%** Acc@0.5. Combined VRSBench + DIOR-RSVG training (below) is meant to close this gap; published GroundingDINO fine-tunes reach 76.8–81.3% on DIOR-RSVG.
 
 For context, published VRSBench results: GeoChat 57.4%, RSGround-R1 63.7%, GeoGround 66.0%, GeoViS 68.5%, a 6-pipeline voting ensemble 79.3%, GeoSearcher (4B VLM + RL) 80.3% — the best we found. No published model reaches 90%.
 
@@ -100,7 +105,9 @@ flowchart LR
 | `rerank.py` | `extract_candidates` (GroundingDINO output → top-10 candidate features), `CandidateReranker` (the model), `RerankerEnsemble` (averaging, test-time flips, box fusion), `mirror` / word-swap tables, loss |
 | `build_rerank_cache.py` | Runs the fine-tuned GroundingDINO once over a split and saves every expression's candidates as `.npy` arrays in `data/vrsbench/rerank_cache/` |
 | `train_rerank.py` | Trains a re-ranker on the cache (~5 min), picks the epoch on the dev split, prints the eval table |
-| `evaluate.py` | `--reranker` runs the full two-stage pipeline live on images |
+| `evaluate.py` | `--reranker` runs the full two-stage pipeline live on images; `--dataset dior_rsvg` scores DIOR-RSVG test |
+| `dior_rsvg.py` | Downloads and unpacks DIOR-RSVG; `DIORRSVGDataset` yields samples in VRSBench's format |
+| `sources.py` | One entry point for both datasets and the rules for combining them without test-photo leakage |
 | `inference.py` | `from_checkpoint(..., reranker_path=...)` enables the second stage for the backend |
 
 ---
@@ -192,6 +199,50 @@ PYTHONUNBUFFERED=1 timeout --signal=INT 11h torchrun --nproc_per_node=2 -m ml.gr
 - **Sessions:** Kaggle stops a session after 12 hours. `timeout 11h` ends training cleanly before that, and the next session resumes from the previous output's `last.pt`. Checkpoints now carry the training history and the best validation loss, so `history.json` and `best.pt` stay correct across sessions.
 - **Precision:** T4s have no bf16, so training uses fp16 with loss scaling automatically; this was checked to train stably from the epoch-9 checkpoint.
 - **Disk:** VRSBench needs ~25 GB with extraction, more than Kaggle's 20 GB `/kaggle/working`. Clone the repo to `/tmp` and point only `--checkpoint-dir` at `/kaggle/working`.
+
+### Datasets and combined training
+
+| Dataset | Loader | Splits | Notes |
+|---|---|---|---|
+| VRSBench | `dataset.py` | `train` (36,281), `validation` (16,146 — the eval file) | Downloaded from `xiang709/VRSBench` on first use |
+| DIOR-RSVG | `dior_rsvg.py` | `train` (26,991), `val` (3,829), `test` (7,500) | `python -m ml.grounding.dior_rsvg` downloads `danielz01/DIOR-RSVG` (gated: accept its terms, `hf auth login`), writes 17,402 photos to `data/dior_rsvg/images/` (5.3 GB) and one annotation file per split |
+
+`sources.py` is the single entry point (`load_split`, `load_training_set`) used by training, caching and evaluation.
+
+**Overlap rules.** Both benchmarks use DIOR photos (VRSBench's `05863_0000.png` is DIOR-RSVG's `05863.jpg`). When both are used for training, each one's training data drops the photos in the *other* benchmark's evaluation split:
+
+| Training data | Removed | Left |
+|---|---|---|
+| VRSBench train | 2,165 expressions on photos in DIOR-RSVG test | 34,116 |
+| DIOR-RSVG train | 6,041 expressions on photos in VRSBench eval | 20,950 |
+| **Combined** | | **55,066** |
+
+Each benchmark's own split is kept as published. DIOR-RSVG splits by expression, so one of its photos can be in both its train and test split; every published DIOR-RSVG result uses that protocol. A single-dataset run is not filtered, so VRSBench-only training is unchanged.
+
+**Commands**
+
+```bash
+# Detector: fine-tune the existing weights on both datasets (fresh LR schedule)
+torchrun --nproc_per_node=2 -m ml.grounding.train --datasets vrsbench dior_rsvg \
+    --init-from <detector .pt> --epochs 5 --batch-size 4 --grad-accum 4 --num-workers 2 \
+    --checkpoint-dir /kaggle/working/checkpoints/grounding
+
+# Caches (cache folders: train, validation, dior_rsvg_train, dior_rsvg_test)
+python -m ml.grounding.build_rerank_cache --checkpoint <detector> --split train
+python -m ml.grounding.build_rerank_cache --checkpoint <detector> --split validation
+python -m ml.grounding.build_rerank_cache --checkpoint <detector> --dataset dior_rsvg --split train
+python -m ml.grounding.build_rerank_cache --checkpoint <detector> --dataset dior_rsvg --split test
+
+# Re-rankers: trained on both, reported on both
+python -m ml.grounding.train_rerank --seed 0 --output <dir>/reranker.pt \
+    --train-caches train dior_rsvg_train --eval-caches validation dior_rsvg_test
+
+# Accuracy on each benchmark
+python -m ml.grounding.evaluate --checkpoint <detector> --reranker "<dir>/reranker*.pt"
+python -m ml.grounding.evaluate --checkpoint <detector> --reranker "<dir>/reranker*.pt" --dataset dior_rsvg
+```
+
+`--init-from` loads weights only; `--resume` continues an interrupted run (weights, optimizer, schedule, epoch). They cannot be combined.
 
 ---
 

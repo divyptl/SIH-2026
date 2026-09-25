@@ -5,6 +5,10 @@ Build the caches first (see build_rerank_cache.py), then:
 
     python -m ml.grounding.train_rerank
 
+    # Detector trained on VRSBench + DIOR-RSVG: train on both caches, report both
+    python -m ml.grounding.train_rerank --train-caches train dior_rsvg_train \
+        --eval-caches validation dior_rsvg_test
+
 The checkpoint is picked on a slice of the *train* images held out as a dev set,
 so the VRSBench eval file, which is reported at the end, plays no part in model
 selection.
@@ -121,6 +125,27 @@ class CachedCandidates:
             raise ValueError(f"Token ids in {cache_dir} do not line up with its text mask")
         self.data["input_ids"] = torch.from_numpy(ids)
 
+    @classmethod
+    def concat(cls, parts: list["CachedCandidates"]) -> "CachedCandidates":
+        """Several caches as one, e.g. VRSBench train + DIOR-RSVG train."""
+        if len(parts) == 1:
+            return parts[0]
+        first = parts[0].meta
+        for part in parts[1:]:
+            for key in ("checkpoint", "max_text_tokens", "nms_iou"):
+                if part.meta[key] != first[key]:
+                    raise ValueError(
+                        f"Caches disagree on {key}: {first[key]!r} vs {part.meta[key]!r}. "
+                        f"Rebuild them from the same detector with the same settings."
+                    )
+        merged = cls.__new__(cls)
+        merged.meta = {**first, "split": "+".join(p.meta.get("split", "?") for p in parts),
+                       "cache_k": min(p.meta["cache_k"] for p in parts)}
+        merged.data = {key: torch.cat([p.data[key] for p in parts]) for key in parts[0].data}
+        merged.gt = torch.cat([p.gt for p in parts])
+        merged.samples = [s for p in parts for s in p.samples]
+        return merged
+
     def __len__(self) -> int:
         return len(self.gt)
 
@@ -211,6 +236,11 @@ def print_table(title: str, results: dict[str, dict]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the GroundingDINO candidate re-ranker")
     parser.add_argument("--cache-dir", default=None)
+    parser.add_argument("--train-caches", nargs="+", default=["train"],
+                        help="Cache folders to train on (merged); 5%% of their images "
+                             "are held out as the dev set")
+    parser.add_argument("--eval-caches", nargs="+", default=["validation"],
+                        help="Cache folders to report on, each separately")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--num-candidates", type=int, default=None)
@@ -253,12 +283,19 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print("Loading cached candidates...")
-    train_data = CachedCandidates(cache_dir / "train", cfg.num_candidates)
-    val_data = CachedCandidates(cache_dir / "validation", cfg.num_candidates)
+    train_data = CachedCandidates.concat(
+        [CachedCandidates(cache_dir / name, cfg.num_candidates) for name in args.train_caches]
+    )
+    eval_sets = {name: CachedCandidates(cache_dir / name, cfg.num_candidates)
+                 for name in args.eval_caches}
+    for name, data in eval_sets.items():
+        if data.meta["checkpoint"] != train_data.meta["checkpoint"]:
+            raise ValueError(f"Cache '{name}' comes from {data.meta['checkpoint']}, the training "
+                             f"caches from {train_data.meta['checkpoint']}")
     train_rows, dev_rows = dev_split(train_data.samples, cfg.dev_fraction)
-    val_rows = torch.arange(len(val_data))
-    print(f"  train {len(train_rows):,}  dev {len(dev_rows):,}  eval {len(val_rows):,}  "
-          f"(K={cfg.num_candidates})")
+    print(f"  train {len(train_rows):,}  dev {len(dev_rows):,}  "
+          + "  ".join(f"{name} {len(data):,}" for name, data in eval_sets.items())
+          + f"  (K={cfg.num_candidates})")
 
     model = CandidateReranker(cfg)
     if cfg.init_words_from_bert:
@@ -318,22 +355,25 @@ def main() -> None:
 
     baseline_dev = evaluate(None, train_data, dev_rows, device)
     model_dev = evaluate(model, train_data, dev_rows, device)
-    baseline_val = evaluate(None, val_data, val_rows, device)
-    model_val = evaluate(model, val_data, val_rows, device)
-
-    oracle = lambda rs: [dict(r, iou=r["oracle"]) for r in rs]
     print_table("Dev (held-out train images)", {
         "GroundingDINO top-1": summarize(baseline_dev, "iou"),
         "re-ranked": summarize(model_dev, "iou"),
         "re-ranked + refined": summarize(model_dev, "iou_refined"),
     })
-    val_summary = {
-        "GroundingDINO top-1": summarize(baseline_val, "iou"),
-        "re-ranked": summarize(model_val, "iou"),
-        "re-ranked + refined": summarize(model_val, "iou_refined"),
-        f"oracle (best of {cfg.num_candidates})": summarize(oracle(model_val), "iou"),
-    }
-    print_table(f"VRSBench eval ({len(val_rows):,} expressions)", val_summary)
+
+    oracle = lambda rs: [dict(r, iou=r["oracle"]) for r in rs]
+    eval_summaries = {}
+    for name, data in eval_sets.items():
+        rows = torch.arange(len(data))
+        baseline = evaluate(None, data, rows, device)
+        picked = evaluate(model, data, rows, device)
+        eval_summaries[name] = {
+            "GroundingDINO top-1": summarize(baseline, "iou"),
+            "re-ranked": summarize(picked, "iou"),
+            "re-ranked + refined": summarize(picked, "iou_refined"),
+            f"oracle (best of {cfg.num_candidates})": summarize(oracle(picked), "iou"),
+        }
+        print_table(f"Eval cache '{name}' ({len(rows):,} expressions)", eval_summaries[name])
 
     out = Path(cfg.checkpoint)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -342,7 +382,11 @@ def main() -> None:
         "config": dataclasses.asdict(cfg),
         "detector_checkpoint": train_data.meta["checkpoint"],
         "epoch": best_epoch,
-        "metrics": {"dev_acc@0.5": best_acc, "eval": val_summary},
+        # "eval" keeps the first eval cache for older readers; "evals" has all.
+        "metrics": {"dev_acc@0.5": best_acc,
+                    "eval": eval_summaries[args.eval_caches[0]],
+                    "evals": eval_summaries},
+        "train_caches": args.train_caches,
     }, out)
     print(f"\nSaved re-ranker: {out}")
 
