@@ -4,21 +4,32 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
+# Inference only: this is what the backend installs to serve the specialists.
 dependencies = [
     "torch>=2.5.0",
     "torchvision>=0.20.0",
-    "transformers>=4.46.0",
+    # Capped with the backend: IndicTrans2 does not support transformers 5.
+    "transformers>=4.51,<5",
+    "numpy>=2.0.0",
+    "Pillow>=10.0.0",
+    # Change-VQA clusters its change mask into boxes with OpenCV.
+    "opencv-python-headless>=4.10.0",
+]
+
+[project.optional-dependencies]
+# Datasets, download scripts, and plotting used by the training pipelines.
+train = [
     "torchgeo>=0.6.0",
     "datasets>=3.0.0",
     "rasterio>=1.4.0",
     "scikit-image>=0.24.0",
-    "opencv-python>=4.10.0",
-    "numpy>=2.0.0",
     "matplotlib>=3.9.0",
     "kaggle>=1.6.0",
-    "Pillow>=10.0.0",
-    "datasets>=3.0.0",
 ]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
 
 [tool.pyrefly]
 search-path = [
@@ -32,16 +43,21 @@ site-package-path = [
     "C:/Users/kella/AppData/Local/Programs/Python/Python313/Lib/site-packages"
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["*"]
+# This directory *is* the `ml` package, so map it to that name; installing the
+# subfolders as top-level packages would break every `ml.*` import and let
+# `datasets` shadow the Hugging Face library of the same name.
+[tool.setuptools]
+package-dir = { "ml" = "." }
+packages = [
+    "ml",
+    "ml.C_VQA",
+    "ml.controller",
+    "ml.datasets",
+    "ml.fusion",
+    "ml.grounding",
+    "ml.vqa",
+    "ml.vqa.training",
+]
 
-[[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu124" }
-torchvision = { index = "pytorch-cu124" }
+# torch/torchvision come from the workspace root's CUDA index.
 

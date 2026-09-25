@@ -11,6 +11,11 @@ uv sync
 cp .env.example .env     # then paste your OpenRouter key into .env
 ```
 
+`backend/` and `ml/` form one uv workspace (see the root `pyproject.toml`), so
+`uv sync` installs the fine-tuned specialists as the `ml` package and the
+environment lives in the repository-root `.venv`. Training dependencies are
+not installed here; for those run `uv sync --package ml --extra train`.
+
 ## Run
 
 ```bash

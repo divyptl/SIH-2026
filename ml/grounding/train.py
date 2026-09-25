@@ -715,7 +715,7 @@ def main() -> None:
         start_epoch = last_epoch + 1
     elif args.init_from:
         ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
-        grounding.model.load_state_dict(ckpt["model"])
+        grounding.load_weights(ckpt["model"])
         print(f"  Initialized weights from {args.init_from} (epoch {ckpt.get('epoch', '?')}); "
               f"optimizer and LR schedule start fresh")
         del ckpt

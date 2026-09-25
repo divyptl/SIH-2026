@@ -17,14 +17,10 @@ dependencies = [
     "sentencepiece>=0.2.0",
     "indictranstoolkit>=1.1.1",
     "typst>=0.15.0",
+    # Fine-tuned specialists (grounding, change-VQA, fusion) served by the controller.
+    "ml",
 ]
 
-# CUDA 13 wheels (RTX 50-series needs CUDA >= 12.8). CPU-only machines still work:
-# the translator falls back to CPU when no GPU is visible.
-[[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
-
+# torch comes from the workspace root's CUDA index.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+ml = { workspace = true }

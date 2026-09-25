@@ -136,7 +136,7 @@ class GroundingInference:
             text_threshold=cfg_dict.get("text_threshold", 0.25),
         )
         grounding = GroundingModel(config)
-        grounding.model.load_state_dict(ckpt["model"])
+        grounding.load_weights(ckpt["model"])
 
         print(f"Loaded fine-tuned GroundingDINO from {checkpoint_path}")
         if "epoch" in ckpt:

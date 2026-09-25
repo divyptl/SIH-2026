@@ -44,6 +44,23 @@ from transformers import (
 
 from ml.grounding.config import ModelConfig
 
+# Swin backbone parameter names under transformers 5 -> transformers 4.
+_SWIN_V4_PREFIX = "model.backbone.conv_encoder.model."
+_SWIN_V5_PREFIX = _SWIN_V4_PREFIX + "swin."
+_SWIN_V5_TO_V4 = (
+    (_SWIN_V5_PREFIX, _SWIN_V4_PREFIX),
+    (".attention.q_proj.", ".attention.self.query."),
+    (".attention.k_proj.", ".attention.self.key."),
+    (".attention.v_proj.", ".attention.self.value."),
+    (".attention.o_proj.", ".attention.output.dense."),
+    (
+        ".attention.relative_position_bias.relative_position_bias_table",
+        ".attention.self.relative_position_bias_table",
+    ),
+    (".mlp.fc1.", ".intermediate.dense."),
+    (".mlp.fc2.", ".output.dense."),
+)
+
 
 class GroundingModel(nn.Module):
     """Wrapper around HF GroundingDINO for remote-sensing grounding.
@@ -100,6 +117,38 @@ class GroundingModel(nn.Module):
     def get_total_params(self) -> int:
         """Count total parameters."""
         return sum(p.numel() for p in self.model.parameters())
+
+    # ── Checkpoint loading ───────────────────────────────────────────────
+
+    def load_weights(self, state_dict: dict[str, torch.Tensor]) -> None:
+        """Load fine-tuned weights saved under either transformers 4 or 5.
+
+        transformers 5 rebuilt the Swin backbone (nested under `swin.`, fused
+        attention names, `mlp.fc1/fc2`), so checkpoints trained there do not
+        load into the transformers 4 model the workspace pins. The tensors are
+        identical; only their names moved, so they are renamed back.
+        """
+        if not any(key.startswith(_SWIN_V5_PREFIX) for key in state_dict):
+            self.model.load_state_dict(state_dict)
+            return
+
+        converted: dict[str, torch.Tensor] = {}
+        for key, value in state_dict.items():
+            # The final Swin layernorm is unused by the detector's backbone.
+            if key.startswith(_SWIN_V5_PREFIX + "layernorm."):
+                continue
+            for old, new in _SWIN_V5_TO_V4:
+                key = key.replace(old, new)
+            converted[key] = value
+
+        result = self.model.load_state_dict(converted, strict=False)
+        # relative_position_index is a fixed buffer rebuilt by the model itself.
+        missing = [k for k in result.missing_keys if not k.endswith("relative_position_index")]
+        if missing or result.unexpected_keys:
+            raise RuntimeError(
+                "Could not convert transformers 5 GroundingDINO checkpoint: "
+                f"missing={missing[:5]} unexpected={result.unexpected_keys[:5]}"
+            )
 
     # ── Forward ──────────────────────────────────────────────────────────
 

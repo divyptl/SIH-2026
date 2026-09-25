@@ -36,6 +36,7 @@ processed_data/
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
 .venv/
 venv/
 env/

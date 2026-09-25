@@ -92,7 +92,7 @@ def load_model(checkpoint: str | None) -> tuple[GroundingModel, str]:
     ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
     model_id = ckpt.get("model_config", {}).get("model_id", ModelConfig.model_id)
     grounding = GroundingModel(ModelConfig(model_id=model_id, freeze_backbone=False))
-    grounding.model.load_state_dict(ckpt["model"])
+    grounding.load_weights(ckpt["model"])
     return grounding, f"{checkpoint} (epoch {ckpt.get('epoch', '?')})"
 
 

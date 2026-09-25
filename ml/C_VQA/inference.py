@@ -17,21 +17,9 @@ from __future__ import annotations
 
 import base64
 import io
-import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-# ---------------------------------------------------------------------------
-# Path bootstrap
-# ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-CVQA_DIR = Path(__file__).resolve().parent
-ML_DIR = CVQA_DIR.parent
-
-for _p in (str(PROJECT_ROOT), str(ML_DIR), str(CVQA_DIR)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import numpy as np
 
@@ -60,16 +48,13 @@ else:
 # ---------------------------------------------------------------------------
 # Project imports
 # ---------------------------------------------------------------------------
-try:
-    from ml.C_VQA.config import ModelConfig
-    from ml.C_VQA.model import SiameseChangeVQA, SimpleTokenizer
-    from ml.C_VQA.transforms import normalize_image
-    from ml.controller.schema import Evidence, ModelRequest, ModelResponse
-except (ImportError, ModuleNotFoundError):
-    from config import ModelConfig  # type: ignore[no-redef]
-    from model import SiameseChangeVQA  # type: ignore[no-redef]
-    from transforms import normalize_image  # type: ignore[no-redef]
-    from controller.schema import Evidence, ModelRequest, ModelResponse  # type: ignore[no-redef]
+# Imported as a package, never via sys.path edits: the backend imports this
+# module, and exposing ml/C_VQA's `config`/`model` as top-level names would
+# shadow the backend's own `config` module.
+from ml.C_VQA.config import ModelConfig
+from ml.C_VQA.model import SiameseChangeVQA, SimpleTokenizer
+from ml.C_VQA.transforms import normalize_image
+from ml.controller.schema import Evidence, ModelRequest, ModelResponse
 
 
 class ChangeVQAModel:
