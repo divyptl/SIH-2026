@@ -16,12 +16,12 @@ class ModelConfig:
     """Architecture hyperparameters."""
 
     # Backbone
-    backbone: str = "resnet50"          # convnext_tiny | resnet18 | resnet34 | resnet50
+    backbone: str = "convnext_tiny"     # Switched from resnet50 to convnext_tiny for better representation
     pretrained: bool = True             # ImageNet pretrained backbone
 
     # Projection head
     embed_dim: int = 256                # Shared embedding dimensionality
-    projection_hidden: int = 512        # Hidden layer in projection MLP
+    projection_hidden: int = 1024       # Increased from 512. Wider MLP improves contrastive learning (SimCLR trick)
 
     # Self-Attention Transformer
     use_attention: bool = True           # Enable Self-Attention blocks after backbone
@@ -31,7 +31,7 @@ class ModelConfig:
 
     # Contrastive loss
     temperature: float = 0.07           # NT-Xent temperature (learnable if learn_temperature=True)
-    learn_temperature: bool = False     # Make temperature a learnable parameter
+    learn_temperature: bool = True      # Enabled (like CLIP) to dynamically scale hard/easy negatives
 
 
 @dataclass
@@ -60,7 +60,7 @@ class TrainConfig:
 
     # Terrain classification (multi-task)
     use_terrain_head: bool = True       # Train terrain classifier alongside contrastive
-    terrain_loss_weight: float = 0.3    # Weight of terrain classification loss
+    terrain_loss_weight: float = 0.1    # Lowered from 0.3 so it doesn't overpower the contrastive alignment
 
     # Checkpointing
     checkpoint_dir: str = "checkpoints/fusion/v3"
