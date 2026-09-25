@@ -28,7 +28,7 @@ models/
 *.npz
 *.hdf5
 data/
-/datasets/
+datasets/
 raw_data/
 processed_data/
 
