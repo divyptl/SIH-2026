@@ -54,7 +54,7 @@ class TrainConfig:
     batch_size: int = 512
     epochs: int = 50
     lr: float = 2e-4
-    weight_decay: float = 1e-2
+    weight_decay: float = 5e-2          # Increased from 1e-2 to combat overfitting
     warmup_epochs: int = 5
     min_lr: float = 1e-7
 
