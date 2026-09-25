@@ -91,11 +91,11 @@ class PairedTransform:
 
         # Random Erasing (Cutout) - apply to both independently to force cross-modality reliance
         if random.random() > 0.5:
-            # Erase 2% to 10% of the image area
-            i, j, h, w, v = T.RandomErasing.get_params(sar, scale=(0.02, 0.1), ratio=(0.3, 3.3), value=[0.0])
+            # Erase 5% to 20% of the image area (increased for stronger regularization)
+            i, j, h, w, v = T.RandomErasing.get_params(sar, scale=(0.05, 0.2), ratio=(0.3, 3.3), value=[0.0])
             sar = TF.erase(sar, i, j, h, w, v)
         if random.random() > 0.5:
-            i, j, h, w, v = T.RandomErasing.get_params(optical, scale=(0.02, 0.1), ratio=(0.3, 3.3), value=[0.0])
+            i, j, h, w, v = T.RandomErasing.get_params(optical, scale=(0.05, 0.2), ratio=(0.3, 3.3), value=[0.0])
             optical = TF.erase(optical, i, j, h, w, v)
 
         # --- Photometric augmentations (modality-specific) ---
@@ -105,8 +105,8 @@ class PairedTransform:
             optical = self.color_jitter(optical)
 
         # Gaussian noise (SAR only, simulates speckle)
-        if random.random() > 0.5:
-            noise_std = random.uniform(0.01, 0.05)
+        if random.random() > 0.2: # Increased probability from 0.5 to 0.8 (rand > 0.2)
+            noise_std = random.uniform(0.02, 0.08) # Increased noise variance
             sar = sar + torch.randn_like(sar) * noise_std
             sar = sar.clamp(0.0, 1.0)
 

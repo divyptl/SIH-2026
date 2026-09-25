@@ -16,22 +16,22 @@ class ModelConfig:
     """Architecture hyperparameters."""
 
     # Backbone
-    backbone: str = "resnet50"          # convnext_tiny | resnet18 | resnet34 | resnet50
+    backbone: str = "convnext_tiny"     # Switched from resnet50 to convnext_tiny for better representation
     pretrained: bool = True             # ImageNet pretrained backbone
 
     # Projection head
     embed_dim: int = 256                # Shared embedding dimensionality
-    projection_hidden: int = 512        # Hidden layer in projection MLP
+    projection_hidden: int = 1024       # Increased from 512. Wider MLP improves contrastive learning (SimCLR trick)
 
     # Self-Attention Transformer
-    use_attention: bool = True           # Enable Self-Attention blocks after backbone
+    use_attention: bool = False          # DISABLED: The un-pretrained transformer is memorizing the training set!
     attn_dim: int = 512                  # Internal attention dimension (projected from backbone)
     attn_heads: int = 8                  # Number of attention heads
     attn_layers: int = 2                 # Number of Transformer encoder layers
 
     # Contrastive loss
     temperature: float = 0.07           # NT-Xent temperature (learnable if learn_temperature=True)
-    learn_temperature: bool = False     # Make temperature a learnable parameter
+    learn_temperature: bool = True      # Enabled (like CLIP) to dynamically scale hard/easy negatives
 
 
 @dataclass
@@ -54,13 +54,13 @@ class TrainConfig:
     batch_size: int = 512
     epochs: int = 50
     lr: float = 2e-4
-    weight_decay: float = 1e-2
+    weight_decay: float = 5e-2          # Increased from 1e-2 to combat overfitting
     warmup_epochs: int = 5
     min_lr: float = 1e-7
 
     # Terrain classification (multi-task)
     use_terrain_head: bool = True       # Train terrain classifier alongside contrastive
-    terrain_loss_weight: float = 0.3    # Weight of terrain classification loss
+    terrain_loss_weight: float = 0.1    # Lowered from 0.3 so it doesn't overpower the contrastive alignment
 
     # Checkpointing
     checkpoint_dir: str = "checkpoints/fusion/v3"
