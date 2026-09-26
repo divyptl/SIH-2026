@@ -29,9 +29,15 @@ export interface BoundingBox {
   y_max: number
 }
 
+/** A change mask: a PNG data URI, opaque where the model predicts change. */
+export interface ChangeMask {
+  png: string
+}
+
 export interface Evidence {
   type: 'bbox' | 'mask' | 'heatmap' | 'observation'
-  data: BoundingBox | null
+  /** A box for `bbox`, a mask for `mask`, otherwise null. */
+  data: BoundingBox | ChangeMask | null
   description: string
   label: string | null
   confidence: number | null

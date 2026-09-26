@@ -20,6 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
+import numpy as np
 from PIL import Image
 
 from config import REPO_ROOT, get_settings
@@ -31,6 +32,8 @@ T = TypeVar("T")
 
 # Grounding returns the re-ranker's pick first, then other candidates above threshold.
 MAX_GROUNDING_BOXES = 5
+# Longest edge of the change-mask overlay; matches the preview it is drawn on.
+MASK_OVERLAY_EDGE_PX = 768
 
 TERRAIN_NAMES = {
     "agri": "agricultural land",
@@ -185,25 +188,53 @@ def change_vqa_gsd_range() -> tuple[float, float]:
     return _change_vqa.get().gsd_range_m
 
 
+def _mask_overlay(mask_prob: np.ndarray, threshold: float) -> str:
+    """The change mask as a PNG data URI: opaque where changed, transparent elsewhere.
+
+    The client uses it as a CSS mask over a coloured layer, so the colour stays
+    a UI decision. It is stretched over the image, so only the aspect matters.
+    """
+    changed = Image.fromarray(((mask_prob >= threshold) * 255).astype(np.uint8), "L")
+    height, width = mask_prob.shape
+    scale = min(1.0, MASK_OVERLAY_EDGE_PX / max(width, height))
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    overlay = Image.new("RGBA", size, (255, 255, 255, 0))
+    overlay.putalpha(changed.resize(size, Image.NEAREST))
+    buffer = io.BytesIO()
+    overlay.save(buffer, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
 def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
     """Answer a change question over a bi-temporal pair with the Siamese Change-VQA model."""
-    result = _change_vqa.get().analyze_pair(_pil(images[0]), _pil(images[1]), query)
+    specialist = _change_vqa.get()
+    result = specialist.analyze_pair(_pil(images[0]), _pil(images[1]), query)
 
+    total = result["total_regions"]
     evidence: list[dict[str, Any]] = [
         {
-            "description": f"{result['change_percentage']}% of the scene is predicted as changed.",
+            "label": "change mask",
+            "description": (
+                f"{result['change_percentage']}% of the scene is predicted as changed, "
+                f"in {total} {'region' if total == 1 else 'regions'}."
+            ),
+            # Shown on the later acquisition, where the change is visible.
             "image_index": 1,
+            "mask": _mask_overlay(result["mask_prob"], specialist.config.mask_threshold),
         }
     ]
-    scene_pixels = result["mask_prob"].size
     for region in result["bounding_boxes"]:
         x_min, y_min, x_max, y_max = region["normalized_bbox"]
+        label = region["label"]
         evidence.append(
             {
-                "description": f"Changed region covering {region['area'] / scene_pixels:.1%} of the scene.",
-                "label": "change",
-                "confidence": region["confidence"],
-                # Shown on the later acquisition, where the change is visible.
+                "label": label,
+                "description": (
+                    f"{label[:1].upper()}{label[1:]}: {region['share']:.1%} of the scene, "
+                    f"in {region['sector']}."
+                ),
+                # How sure the model is of the label, the figure shown next to it.
+                "confidence": region["label_confidence"],
                 "image_index": 1,
                 "box": {"x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max},
             }

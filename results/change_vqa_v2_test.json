@@ -1,0 +1,136 @@
+{
+  "checkpoint": "checkpoints/change_detection_v2/best.pt",
+  "split": "test",
+  "gsd_range_m": [
+    0.5,
+    20.0
+  ],
+  "results": {
+    "gsd:<1 m": {
+      "questions": 3302,
+      "vqa_acc": 0.8283,
+      "mask_iou": 0.7911,
+      "mask_f1": 0.8834
+    },
+    "gsd:>=8 m": {
+      "questions": 960,
+      "vqa_acc": 0.8135,
+      "mask_iou": 0.4083,
+      "mask_f1": 0.5799
+    },
+    "overall": {
+      "questions": 4262,
+      "vqa_acc": 0.825,
+      "mask_iou": 0.5953,
+      "mask_f1": 0.7463
+    },
+    "question:any_change": {
+      "questions": 560,
+      "vqa_acc": 0.9321,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:became": {
+      "questions": 60,
+      "vqa_acc": 0.75,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:count": {
+      "questions": 560,
+      "vqa_acc": 0.7839,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:demolished": {
+      "questions": 60,
+      "vqa_acc": 0.9833,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:flooding": {
+      "questions": 60,
+      "vqa_acc": 0.9167,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:new_buildings": {
+      "questions": 560,
+      "vqa_acc": 0.9179,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:scale": {
+      "questions": 560,
+      "vqa_acc": 0.85,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:trend_bare ground": {
+      "questions": 60,
+      "vqa_acc": 0.8,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:trend_built-up": {
+      "questions": 560,
+      "vqa_acc": 0.9,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:trend_cropland": {
+      "questions": 60,
+      "vqa_acc": 0.9,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:trend_vegetation": {
+      "questions": 60,
+      "vqa_acc": 0.9,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:trend_water": {
+      "questions": 60,
+      "vqa_acc": 0.6167,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:vegetation_loss": {
+      "questions": 60,
+      "vqa_acc": 0.9667,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:was": {
+      "questions": 60,
+      "vqa_acc": 0.8333,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:what_changed": {
+      "questions": 560,
+      "vqa_acc": 0.9018,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:where": {
+      "questions": 362,
+      "vqa_acc": 0.2652,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "source:dynamic_world": {
+      "questions": 960,
+      "vqa_acc": 0.8135,
+      "mask_iou": 0.4083,
+      "mask_f1": 0.5799
+    },
+    "source:levir_hf": {
+      "questions": 3302,
+      "vqa_acc": 0.8283,
+      "mask_iou": 0.7911,
+      "mask_f1": 0.8834
+    }
+  }
+}

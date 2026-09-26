@@ -50,6 +50,16 @@
     "image": "छवि {{index}}",
     "georeferenced": "जियोरेफरेंस्ड",
     "gsd": "{{value}} एम/पिक्सेल",
+    "changeMask": "मास्क बदलू",
+    "maskOpacity": "मास्कक अस्पष्टता बदलू",
+    "before": "पहिने",
+    "after": "एकर बाद",
+    "divider": "पहिने आ बादमे तुलना करबाक लेल खींचि लिअ",
+    "view": {
+      "label": "तुलना दृश्य",
+      "swipe": "स्वाइप करू",
+      "side": "संग-संग"
+    },
     "evidence": "साक्ष्य ({{count}})",
     "noSpatial": "छविपर बिना स्थानक वस्तु: {{count}}",
     "controllerNotes": "कंट्रोलरक टिप्पणी",

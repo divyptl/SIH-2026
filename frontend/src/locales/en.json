@@ -52,6 +52,16 @@
     "image": "Image {{index}}",
     "georeferenced": "georeferenced",
     "gsd": "{{value}} m/pixel",
+    "changeMask": "Change mask",
+    "maskOpacity": "Change mask opacity",
+    "before": "Before",
+    "after": "After",
+    "divider": "Drag to compare before and after",
+    "view": {
+      "label": "Comparison view",
+      "swipe": "Swipe",
+      "side": "Side by side"
+    },
     "evidence": "Evidence ({{count}})",
     "noSpatial": "Items with no location on the image: {{count}}",
     "controllerNotes": "Notes from the controller",

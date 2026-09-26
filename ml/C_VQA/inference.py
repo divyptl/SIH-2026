@@ -50,6 +50,19 @@ else:
 # LEVIR-CD alone (0.5 m aerial imagery).
 LEGACY_GSD_RANGE_M = (0.5, 0.5)
 
+# Most regions marked with a box; every region still counts towards the total.
+MAX_REGIONS = 8
+# Asked of a crop around each region to name the change inside it.
+REGION_QUESTION = "What has changed in these 2 images?"
+# Answers that say whether or how much something changed, but not what; they
+# do not describe a region, so the summary skips them.
+NON_DESCRIPTIVE_ANSWERS = {
+    "yes", "no", "change", "no change", "unchanged", "increased", "decreased",
+    "minor change", "moderate change", "large scale change", "no significant change detected",
+    "center", "north-west", "north-east", "south-west", "south-east",
+    "0", "1", "2", "3", "4", "5 or more",
+}
+
 # Project imports
 # ---------------------------------------------------------------------------
 # Imported as a package, never via sys.path edits: the backend imports this
@@ -247,8 +260,6 @@ class ChangeVQAModel:
         else:
             mask_prob = outputs["change_mask_prob"][0, 0].float().cpu().numpy()
 
-        exec_time_ms = (time.perf_counter() - start_time) * 1000.0
-
         # Everything reported comes from the network: its answer with its top-1
         # softmax confidence, and its change mask. The mask is not blended with a
         # raw pixel difference, and the answer is not replaced by keyword rules or
@@ -256,30 +267,114 @@ class ChangeVQAModel:
         answer_text = outputs["predicted_answer_text"][0]
         answer_confidence = float(outputs["answer_confidence"][0])
 
-        bboxes = self.model.extract_bounding_boxes(
-            mask_prob,
-            threshold=self.config.mask_threshold,
-            min_area=35,
-            max_boxes=8,
-        )
+        regions, total_regions = self._regions(mask_prob)
+        self._describe_regions(rgb_t1, rgb_t2, regions)
 
         changed_pixel_count = int((mask_prob >= self.config.mask_threshold).sum())
         change_percentage = round((changed_pixel_count / mask_prob.size) * 100.0, 2)
+        dominant = self._dominant_label(regions)
+        exec_time_ms = (time.perf_counter() - start_time) * 1000.0
 
         return {
-            "answer": self._describe(answer_text, change_percentage, bboxes),
+            "answer": self._describe(answer_text, change_percentage, regions, total_regions),
             "primary_answer": answer_text,
             "confidence": round(answer_confidence, 4),
             "change_percentage": change_percentage,
             "changed_pixels": changed_pixel_count,
-            # Trained on LEVIR-CD, whose masks label building change only.
-            "detected_domain": "building_change" if bboxes else "unchanged",
-            "bounding_boxes": bboxes,
+            "detected_domain": dominant.replace(" ", "_") if dominant else "unchanged",
+            "bounding_boxes": regions,
+            "total_regions": total_regions,
             "mask_prob": mask_prob,
             "execution_time_ms": round(exec_time_ms, 2),
             "original_size": orig_size,
             "tiles": tiles,
         }
+
+    def _regions(self, mask_prob: np.ndarray) -> tuple[list[dict[str, Any]], int]:
+        """Changed regions worth marking, largest first, and how many there are.
+
+        A light morphological opening first cuts the thin strands that would
+        otherwise chain separate changes (river channels, road networks) into
+        one scene-wide blob, and patches under 0.1% of the scene are ignored.
+        The count covers every region; only the MAX_REGIONS largest are returned.
+        """
+        import cv2
+
+        height, width = mask_prob.shape
+        binary = (mask_prob >= self.config.mask_threshold).astype(np.uint8)
+        kernel = max(3, round(min(height, width) / 128)) | 1
+        opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, np.ones((kernel, kernel), np.uint8))
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+
+        min_area = max(35, 0.001 * height * width)
+        found = sorted(
+            (i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= min_area),
+            key=lambda i: -stats[i, cv2.CC_STAT_AREA],
+        )
+        regions = []
+        for i in found[:MAX_REGIONS]:
+            x, y, w, h, area = (int(v) for v in stats[i, :5])
+            normalized = [round(x / width, 4), round(y / height, 4),
+                          round((x + w) / width, 4), round((y + h) / height, 4)]
+            regions.append({
+                "bbox": [x, y, x + w, y + h],
+                "normalized_bbox": normalized,
+                "area": area,
+                "share": area / (height * width),
+                # Mean change probability inside the region.
+                "confidence": round(float(mask_prob[labels == i].mean()), 4),
+                "sector": self._sector(normalized),
+                "label": "change",
+                "label_confidence": None,
+            })
+        return regions, len(found)
+
+    @torch.no_grad()
+    def _describe_regions(self, img_t1: Image.Image, img_t2: Image.Image, regions: list[dict[str, Any]]) -> None:
+        """Name the change in each region with the model's own answer about it.
+
+        The model is asked REGION_QUESTION about a crop around each region, with
+        at least one tile of context as in training, all regions in one batch.
+        """
+        if not regions:
+            return
+        width, height = img_t1.size
+        size = (self.image_size, self.image_size)
+        crops_t1, crops_t2 = [], []
+        for region in regions:
+            x1, y1, x2, y2 = region["normalized_bbox"]
+            cx, cy = (x1 + x2) / 2 * width, (y1 + y2) / 2 * height
+            side = max(self.image_size, (x2 - x1) * width, (y2 - y1) * height)
+            box = (
+                int(max(0, cx - side / 2)), int(max(0, cy - side / 2)),
+                int(min(width, cx + side / 2)), int(min(height, cy + side / 2)),
+            )
+            crops_t1.append(self._to_tensor(img_t1.crop(box).resize(size)))
+            crops_t2.append(self._to_tensor(img_t2.crop(box).resize(size)))
+
+        outputs = self.model(
+            t1=torch.cat(crops_t1), t2=torch.cat(crops_t2),
+            question_text=[REGION_QUESTION] * len(regions),
+        )
+        probabilities = outputs["answer_logits"].float().softmax(dim=-1)
+        for region, probs in zip(regions, probabilities):
+            confidence, index = probs.max(dim=0)
+            region["label"] = self.model.answers_vocab[int(index)]
+            region["label_confidence"] = round(float(confidence), 4)
+
+    @staticmethod
+    def _label_shares(regions: list[dict[str, Any]]) -> list[tuple[str, float]]:
+        """Descriptive region labels with the share of the scene they cover, largest first."""
+        shares: dict[str, float] = {}
+        for region in regions:
+            if region["label"] not in NON_DESCRIPTIVE_ANSWERS:
+                shares[region["label"]] = shares.get(region["label"], 0.0) + region["share"]
+        return sorted(shares.items(), key=lambda item: -item[1])
+
+    @classmethod
+    def _dominant_label(cls, regions: list[dict[str, Any]]) -> str | None:
+        ranked = cls._label_shares(regions)
+        return ranked[0][0] if ranked else None
 
     @staticmethod
     def _sector(normalized_bbox: list[float]) -> str:
@@ -302,22 +397,34 @@ class ChangeVQAModel:
         cls,
         answer: str,
         change_percentage: float,
-        bboxes: list[dict[str, Any]],
+        regions: list[dict[str, Any]],
+        total_regions: int,
     ) -> str:
-        """Phrase the network's answer with the change its mask localised."""
+        """Phrase the network's answer with the change its mask localised and
+        what it says about the largest regions."""
         sentence = f"{answer[:1].upper()}{answer[1:]}."
-        if bboxes:
-            sectors = ", ".join(dict.fromkeys(cls._sector(b["normalized_bbox"]) for b in bboxes[:3]))
-            return (
-                f"{sentence} The change mask marks {change_percentage}% of the scene as changed, "
-                f"in {len(bboxes)} region(s), mainly {sectors}."
+        if not regions:
+            if change_percentage > 0:
+                return (
+                    f"{sentence} The change mask marks {change_percentage}% of the scene as changed, "
+                    "with no region large enough to localise."
+                )
+            return f"{sentence} The change mask marks no changed region."
+
+        noun = "region" if total_regions == 1 else "regions"
+        marked = f"; the {len(regions)} largest are marked" if total_regions > len(regions) else ""
+        text = (
+            f"{sentence} The change mask marks {change_percentage}% of the scene as changed, "
+            f"in {total_regions} {noun}{marked}."
+        )
+        ranked = cls._label_shares(regions)[:2]
+        if ranked:
+            parts = " and ".join(f"{label} ({share:.0%} of the scene)" for label, share in ranked)
+            text += (
+                f" By region, the model describes the change mainly as {parts}; "
+                f"the largest region is in {regions[0]['sector']}."
             )
-        if change_percentage > 0:
-            return (
-                f"{sentence} The change mask marks {change_percentage}% of the scene as changed, "
-                "with no region large enough to localise."
-            )
-        return f"{sentence} The change mask marks no changed region."
+        return text
 
     def predict(self, request: ModelRequest) -> ModelResponse:
         """Process a request and return a standardized ModelResponse (SpecialistModel protocol).
@@ -383,7 +490,10 @@ class ChangeVQAModel:
                         "area_pixels": box_info["area"],
                         "label": box_info["label"],
                     },
-                    description=f"Detected change cluster with confidence {box_info['confidence']:.2f} ({box_info['area']} px).",
+                    description=(
+                    f"{box_info['label'][:1].upper()}{box_info['label'][1:]}: "
+                    f"{box_info['share']:.1%} of the scene, in {box_info['sector']}."
+                ),
                 )
             )
 

@@ -1,0 +1,70 @@
+{
+  "checkpoint": "checkpoints/change_detection/best.pt",
+  "split": "test",
+  "gsd_range_m": [
+    0.5,
+    0.5
+  ],
+  "results": {
+    "gsd:<1 m": {
+      "questions": 6649,
+      "vqa_acc": 0.8325,
+      "mask_iou": 0.7968,
+      "mask_f1": 0.8869
+    },
+    "overall": {
+      "questions": 6649,
+      "vqa_acc": 0.8325,
+      "mask_iou": 0.7968,
+      "mask_f1": 0.8869
+    },
+    "question:any_change": {
+      "questions": 1000,
+      "vqa_acc": 0.933,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:count": {
+      "questions": 1000,
+      "vqa_acc": 0.73,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:new_buildings": {
+      "questions": 1000,
+      "vqa_acc": 0.936,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:scale": {
+      "questions": 1000,
+      "vqa_acc": 0.872,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:trend_built-up": {
+      "questions": 1000,
+      "vqa_acc": 0.953,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:what_changed": {
+      "questions": 1000,
+      "vqa_acc": 0.932,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "question:where": {
+      "questions": 649,
+      "vqa_acc": 0.2758,
+      "mask_iou": null,
+      "mask_f1": null
+    },
+    "source:levir_hf": {
+      "questions": 6649,
+      "vqa_acc": 0.8325,
+      "mask_iou": 0.7968,
+      "mask_f1": 0.8869
+    }
+  }
+}

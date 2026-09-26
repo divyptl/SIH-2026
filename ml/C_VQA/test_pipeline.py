@@ -176,5 +176,45 @@ class TestTiledInference(unittest.TestCase):
         self.assertEqual(small["tiles"], 1)
 
 
+class TestRegions(unittest.TestCase):
+    def setUp(self):
+        model = SiameseChangeVQA(ModelConfig(backbone="resnet18", pretrained=False))
+        self.specialist = ChangeVQAModel(model, device="cpu")
+
+    def test_thin_strands_do_not_merge_regions_and_specks_are_ignored(self):
+        mask = np.zeros((512, 512), dtype=np.float32)
+        mask[50:150, 50:150] = 1.0      # blob A
+        mask[50:150, 300:400] = 1.0     # blob B
+        mask[99:101, 150:300] = 1.0     # 2 px strand joining them
+        mask[450:452, 450:452] = 1.0    # speck
+        regions, total = self.specialist._regions(mask)
+        self.assertEqual(total, 2)
+        self.assertEqual(len(regions), 2)
+        self.assertAlmostEqual(regions[0]["share"], 100 * 100 / 512**2, places=3)
+
+    def test_count_reports_all_regions_but_marks_the_largest(self):
+        mask = np.zeros((512, 512), dtype=np.float32)
+        for i in range(12):
+            y, x = divmod(i, 4)
+            mask[20 + y * 120 : 60 + y * 120, 20 + x * 120 : 60 + x * 120] = 1.0
+        regions, total = self.specialist._regions(mask)
+        self.assertEqual(total, 12)
+        self.assertEqual(len(regions), 8)
+        for region in regions:
+            region["label"] = "bare ground to water"
+        text = ChangeVQAModel._describe("yes", 7.3, regions, total)
+        self.assertIn("in 12 regions; the 8 largest are marked", text)
+        self.assertIn("bare ground to water", text)
+
+    def test_regions_are_labelled_by_the_model(self):
+        image = Image.fromarray(np.random.default_rng(1).integers(0, 255, (512, 512, 3), dtype=np.uint8))
+        mask = np.zeros((512, 512), dtype=np.float32)
+        mask[100:300, 100:300] = 1.0
+        regions, _ = self.specialist._regions(mask)
+        self.specialist._describe_regions(image, image, regions)
+        self.assertIn(regions[0]["label"], self.specialist.model.answers_vocab)
+        self.assertTrue(0.0 <= regions[0]["label_confidence"] <= 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

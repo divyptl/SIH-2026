@@ -51,6 +51,10 @@ class _Tally:
 
 @torch.no_grad()
 def evaluate(checkpoint: str, data_root: str, split: str, batch_size: int, device: str) -> dict[str, Any]:
+    # from_checkpoint falls back to an untrained model for a missing file, which
+    # would report meaningless scores here.
+    if not Path(checkpoint).is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint} (train first, or check the path)")
     specialist = ChangeVQAModel.from_checkpoint(checkpoint, device=device)
     model = specialist.model
     dataset = CDVQADataset(

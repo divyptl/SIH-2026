@@ -34,6 +34,7 @@ class Evidence(BaseModel):
     """
 
     type: Literal["bbox", "mask", "heatmap", "observation"] = "observation"
+    # bbox: a BoundingBox dict; mask: {"png": data URI, opaque where changed}.
     data: Any = None
     description: str
 

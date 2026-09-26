@@ -50,6 +50,14 @@
     "image": "ᱪᱤᱛᱟᱹᱨ {{index}}",
     "georeferenced": "ᱡᱤᱭᱳᱨᱮᱯᱷᱟᱨᱮᱱᱥ ᱟᱠᱟᱱ",
     "gsd": "{{value}} ᱮᱢ/ᱯᱤᱠᱠᱮᱞ",
+    "changeMask": "ᱢᱮᱥᱠ ᱵᱚᱱᱚᱫᱚᱞ ᱢᱮ",
+    "maskOpacity": "ᱢᱮᱥᱠ ᱚᱯᱟᱥᱤᱴᱤ ᱵᱚᱱᱚᱫᱚᱞ ᱢᱮ",
+    "before": "ᱢᱟᱲᱟᱝ ᱨᱮ",
+    "after": "ᱚᱱᱟ ᱛᱟᱭᱚᱢ",
+    "view": {
+      "swipe": "ᱥᱳᱭᱤᱯ ᱢᱮ",
+      "side": "ᱥᱳᱨᱥᱳᱯᱳᱨ"
+    },
     "evidence": "ᱥᱟᱹᱵᱩᱫ ({{count}})",
     "noSpatial": "ᱪᱤᱛᱟᱹᱨ ᱨᱮ ᱴᱷᱟᱶ ᱵᱟᱹᱱᱩᱜ ᱡᱤᱱᱤᱥ: {{count}}",
     "controllerNotes": "ᱠᱚᱱᱴᱨᱚᱞᱟᱨ ᱨᱮᱭᱟᱜ ᱱᱳᱴ",

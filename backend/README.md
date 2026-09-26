@@ -1,7 +1,9 @@
 # SatQuery AI — backend
 
-FastAPI service exposing the agentic remote-sensing analysis workflow. The
-vision-language reasoning is served through [OpenRouter](https://openrouter.ai).
+FastAPI service exposing the agentic remote-sensing analysis workflow. Tasks
+with a fine-tuned model from `ml/` (grounding, change VQA, optical–SAR fusion)
+run it in-process; the rest use a general vision-language model through
+[OpenRouter](https://openrouter.ai).
 
 ## Setup
 
@@ -13,8 +15,11 @@ cp .env.example .env     # then paste your OpenRouter key into .env
 
 `backend/` and `ml/` form one uv workspace (see the root `pyproject.toml`), so
 `uv sync` installs the fine-tuned specialists as the `ml` package and the
-environment lives in the repository-root `.venv`. Training dependencies are
-not installed here; for those run `uv sync --package ml --extra train`.
+environment lives in the repository-root `.venv`. To install everything —
+backend, training dependencies and the Earth Engine client — in one go, run
+`uv sync --all-packages --all-extras` from the repository root. `uv sync`
+removes whatever the command does not ask for, so a narrower command such as
+`uv sync --package ml --extra train` uninstalls the backend's packages.
 
 ## Run
 
@@ -48,6 +53,16 @@ All settings are environment variables, read from `backend/.env`.
 | `TRANSLATION_BEAMS` / `TRANSLATION_BATCH_SIZE` | `5` / `16` | Beam search width and sentences per batch. |
 | `INDICTRANS_INDIC_EN_MODEL` / `INDICTRANS_EN_INDIC_MODEL` | `ai4bharat/indictrans2-*-dist-200M` | Swap in the 1B checkpoints for higher quality. |
 | `CORS_ORIGINS` | `localhost:3000,127.0.0.1:3000,localhost:5173` | Comma-separated allowed origins. |
+| `SPECIALISTS_ENABLED` | `true` | `false` sends every task to the OpenRouter baseline, for comparison. |
+| `GROUNDING_CHECKPOINT` | `checkpoints/grounding/v1/best.pt` | Fine-tuned GroundingDINO. Relative paths resolve against the repository root; empty disables it. |
+| `GROUNDING_RERANKERS` | `auto` | `auto` uses every `reranker*.pt` beside the grounding checkpoint; or a comma-separated list; empty for none. |
+| `CHANGE_VQA_CHECKPOINT` | `checkpoints/c_vqa_best.pt` | Change-VQA model for `change_vqa` and `change_description`. Point it at your latest training run, e.g. `checkpoints/change_detection_v2/best.pt`. |
+| `FUSION_CHECKPOINT` | `checkpoints/fusion_best.pt` | Optical–SAR fusion model. |
+| `SPECIALIST_DEVICE` | `auto` | Device for the specialists: `auto`, `cpu`, `cuda:1`, … |
+| `SPECIALIST_PRELOAD` | `false` | Load the specialists at startup instead of on their first request. |
+
+Settings are read once at startup: restart the server after editing `.env`
+(`--reload` only watches code).
 
 ## Endpoints
 
@@ -85,9 +100,19 @@ curl -X POST http://localhost:8000/api/analyse \
   -F "images=@t1.tif" -F "images=@t2.tif"
 ```
 
-The response carries the answer, a confidence score, normalised bounding-box
-evidence, and an `trace` object recording the resolved input configuration, the
-routed task and why, the tools selected, and per-step timings.
+The response carries the answer, a confidence score, evidence, and a `trace`
+object recording the resolved input configuration, the routed task and why, the
+tools selected, whether a fine-tuned model answered (`domain_adapted`), and
+per-step timings. Evidence items are one of:
+
+- `bbox` — a normalised box (`data.x_min` … `data.y_max` in 0–1), with a label
+  and, for the change model, the model's name for the change inside it.
+- `mask` — a change mask as a PNG data URI in `data.png`, opaque where change is
+  predicted; the frontend draws it as a tinted overlay.
+- `observation` — a finding with no location.
+
+`inputs[].ground_sample_distance_m` is the upload's metres per pixel, read from
+its GeoTIFF tags (null for PNG, JPEG and plain TIFF).
 
 ### `POST /api/report`
 
@@ -167,6 +192,7 @@ agent/
 services/
   images.py                Decoding, validation, pair compatibility, normalisation
   openrouter_client.py     Async OpenRouter SDK wrapper
+  specialists.py           Adapters that run the fine-tuned models from ml/
   translation.py           IndicTrans2 Indic <-> English layer around the controller
   report.py                Typst PDF export of an analysis result
 assets/
@@ -179,15 +205,39 @@ scripts/
 > Do not add a top-level `openrouter.py` here — it shadows the installed SDK
 > package and makes `from openrouter import OpenRouter` import itself.
 
-## Wiring in a fine-tuned specialist
+## Fine-tuned specialists
 
 The problem statement is explicit that a generic VLM does not satisfy the
 requirements, so every registry entry names the specialist that should own its
-task. Until one is registered, the OpenRouter baseline answers instead and the
-response sets `trace.domain_adapted: false`. The confidence score is the model's
-own estimate, reported as-is.
+task. A task uses its specialist when the checkpoint configured for it exists;
+otherwise the OpenRouter baseline answers and the response sets
+`trace.domain_adapted: false`. The UI shows which one answered.
 
-To promote a task, implement the module against
-`ml.controller.schema.SpecialistModel`, set `loader` on its `ToolEntry` in
-[`agent/registry.py`](agent/registry.py), and implement the specialist branch of
-`AgenticController._execute`.
+| Task | Specialist | Default checkpoint |
+|---|---|---|
+| `grounding` | Fine-tuned GroundingDINO + re-ranker ensemble (`ml.grounding`) | `checkpoints/grounding/v1/best.pt` |
+| `change_vqa`, `change_description` | Siamese Change-VQA (`ml.C_VQA`) | `checkpoints/c_vqa_best.pt` |
+| `fusion` | Optical–SAR dual encoder with terrain head (`ml.fusion`) | `checkpoints/fusion_best.pt` |
+| `vqa`, `caption` | — (baseline only) | — |
+
+Behaviour worth knowing:
+
+- **Resolution check.** A specialist can declare the metres per pixel it was
+  trained on (`gsd_range` on its `ToolEntry`; Change-VQA reads it from the
+  checkpoint). Imagery more than 2x outside that range goes to the baseline,
+  with a note in `trace.warnings` saying why — a model shown imagery far from
+  its training data answers confidently and wrongly. Uploads without
+  georeferencing have no known resolution; they still reach the specialist,
+  with a caveat.
+- **Failures fall back.** If a specialist raises, the baseline answers and the
+  trace records the error.
+- **Confidence** is the model's own estimate (softmax probability or
+  detection score), reported as-is.
+
+To add a specialist: write a runner in
+[`services/specialists.py`](services/specialists.py) that takes
+`(query, images)` and returns the baseline's payload shape (`answer`,
+`confidence`, `evidence` with normalised `box` dicts or a `mask` data URI), add
+a checkpoint setting to [`config.py`](config.py), and set `runner`,
+`checkpoint` (and optionally `gsd_range`) on the task's entry in
+[`agent/registry.py`](agent/registry.py).

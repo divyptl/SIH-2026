@@ -126,12 +126,19 @@ def prepare(config: dict[str, Any], out: Path, scales: list[int], max_tiles: int
         name = spec.get("name", spec["type"])
         source_scales = [int(s) for s in spec.get("scales", scales)]
         limit = int(spec.get("max_tiles", max_tiles))
+        # Readers yield one split after another, so a single shared cap would be
+        # used up by train and leave nothing to validate or test on.
+        limits = {"train": limit, "val": max(1, limit // 5), "test": max(1, limit // 5)}
         tile_dir = out / "tiles" / name
         tile_dir.mkdir(parents=True, exist_ok=True)
         written = 0
         print(f"[prepare] {name}: reading ({spec['type']}), scales {source_scales}")
 
         for pair in read_source(spec):
+            if all(counts[name][split] >= cap for split, cap in limits.items()):
+                break
+            if counts[name][pair.split] >= limits.get(pair.split, limit):
+                continue
             for tile_id, scale, gsd_m, t1, t2, labels in tiles_for(pair, source_scales):
                 if not labels.change.any() and not _keep(tile_id, keep_unchanged):
                     continue
@@ -154,10 +161,8 @@ def prepare(config: dict[str, Any], out: Path, scales: list[int], max_tiles: int
                 gsds[name].add(round(gsd_m, 3))
                 answers.update(q["answer"] for q in questions)
                 written += 1
-                if written >= limit:
+                if counts[name][pair.split] >= limits.get(pair.split, limit):
                     break
-            if written >= limit:
-                break
         print(f"[prepare] {name}: {written} tiles {dict(counts[name])}, GSD {sorted(gsds[name])} m")
 
     for split, samples in manifests.items():
@@ -184,14 +189,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scales", type=int, nargs="+", default=[1, 2, 4],
                         help="Downsampling factors to tile at (default: 1 2 4)")
     parser.add_argument("--max-tiles", type=int, default=20_000,
-                        help="Cap per source so one large dataset cannot dominate")
+                        help="Training tiles per source, so one large dataset cannot dominate; "
+                             "val and test get a fifth of this each")
     parser.add_argument("--keep-unchanged", type=float, default=0.5,
                         help="Share of tiles with no change to keep (default: 0.5)")
     args = parser.parse_args(argv)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    config = json.loads(Path(args.config).read_text())
+    # utf-8-sig: Windows PowerShell 5 writes UTF-8 files with a byte-order mark.
+    config = json.loads(Path(args.config).read_text(encoding="utf-8-sig"))
     info = prepare(config, out, args.scales, args.max_tiles, args.keep_unchanged)
     if not info["sources"]:
         print("[prepare] No tiles were written; check the source paths.", file=sys.stderr)

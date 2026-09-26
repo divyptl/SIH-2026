@@ -50,6 +50,16 @@
     "image": "تصویر {{index}}",
     "georeferenced": "جیو ریفرنسڈ",
     "gsd": "{{value}} m/پکسل",
+    "changeMask": "ماسک بدلاو",
+    "maskOpacity": "ماسک اوپیسیٹی بدلاو",
+    "before": "امہ برٛونٛہہ",
+    "after": "پتہٕ",
+    "divider": "برٛۄنٛہہ تہٕ پتہٕ موازنہ کرنہٕ خٲطرٕ کٔرو ڈریگ",
+    "view": {
+      "label": "موازنہ نظارہ",
+      "swipe": "سوایپ کر",
+      "side": "شانہ بہ شانہ"
+    },
     "evidence": "ثبوت ({{count}})",
     "noSpatial": "تصویرِ پیٹھ بغٲر جاے والیٚ چیز: {{count}}",
     "controllerNotes": "کنٹرولرٕکۍ نوٹ",

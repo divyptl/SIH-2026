@@ -53,8 +53,13 @@ Captioning              (bi-temporal)   Fusion
 |---|---|---|
 | Visual Question Answering / Captioning | Pretrained Vision-Language Model (BLIP-2 or a remote-sensing-adapted VLM like RS-LLaVA / GeoChat) | RSVQA, VRSBench |
 | Text-guided Region Grounding | GroundingDINO proposes 10 boxes, a transformer re-ranker picks the described one ([details](docs/grounding-module-explained.md)) | VRSBench grounding subset |
-| Change Detection / Change-VQA | Siamese vision encoder + VLM head | CDVQA |
+| Change Detection / Change-VQA | Siamese vision encoder + VLM head; tiled change mask, each changed region named by the model ([details](ml/C_VQA/README.md)) | LEVIR-CD (0.5 m aerial) + Sentinel-2 pairs labelled with Dynamic World (10 m) |
 | Optical–SAR Fusion | CLIP-style dual-encoder, contrastive pretraining | Sentinel-1 & 2 |
+
+The controller only sends imagery to a fine-tuned model when its resolution
+(read from the GeoTIFF) is close to what the model was trained on; otherwise a
+general vision-language model answers, and the result says so. Every result is
+labelled "Fine-tuned model" or "General VLM".
 
 ---
 
@@ -72,11 +77,10 @@ Captioning              (bi-temporal)   Fusion
 
 ## Tech stack
 
-- **Frontend:** Next.js / React, Leaflet or deck.gl for GeoTIFF rendering and map-based evidence overlays
-- **Backend:** FastAPI
-- **ML:** PyTorch, Hugging Face Transformers
-- **Model serving:** TorchServe / REST wrappers
-- **Report export:** PDF + GeoJSON
+- **Frontend:** React + Vite + TanStack Router, shadcn/ui; evidence boxes and change masks drawn over server-rendered previews
+- **Backend:** FastAPI, with the fine-tuned models served in-process and an OpenRouter VLM as the baseline
+- **ML:** PyTorch, Hugging Face Transformers, one uv workspace shared with the backend
+- **Report export:** PDF (Typst)
 
 ---
 
@@ -89,7 +93,7 @@ Captioning              (bi-temporal)   Fusion
   /datasets            # PyTorch dataset loaders (SEN1-2, BigEarthNet, etc.)
   /vqa                 # VQA + captioning model, training and inference
   /grounding           # Grounding model, training and inference
-  /change-detection    # Change VQA model, training and inference
+  /C_VQA               # Change VQA model: data pipeline, training, evaluation, inference
   /fusion              # Optical-SAR fusion model, contrastive pretraining
   /controller          # Agentic controller — intent parsing, routing, aggregation
 /data
@@ -108,7 +112,8 @@ Captioning              (bi-temporal)   Fusion
 | [SEN1-2 (Sentinel-1&2 Image Pairs)](https://www.kaggle.com/datasets/requiemonk/sentinel12-image-pairs-segregated-by-terrain) | SAR-Optical fusion, SAR analysis (16K paired SAR & optical patches, terrain-labeled) |
 | RSVQA | Visual Question Answering |
 | VRSBench | Captioning, grounding, VQA |
-| CDVQA | Change-based Visual Question Answering |
+| [LEVIR-CD](https://justchenhao.github.io/LEVIR/) | Change-VQA: building change at 0.5 m |
+| Sentinel-2 + [Dynamic World](https://dynamicworld.app/) | Change-VQA: land-cover and water change at 10 m, exported from Earth Engine |
 
 Evaluation also uses an ISRO/SAC dataset of co-registered Cartosat-2S optical and RISAT SAR image pairs (annotations not disclosed to teams).
 
@@ -163,22 +168,26 @@ sar_img, optical_img = dataset[0]  # (1,256,256) and (3,256,256) float32 tensors
 ## Getting started
 
 ```bash
-# Clone the repo
-git clone <repo-url>
-cd satquery-ai
+git clone https://github.com/divyptl/SIH-2026.git
+cd SIH-2026
 
-# Backend setup
+# Python: backend + ml share one uv workspace and the root .venv
+uv sync --all-packages --all-extras
+
+# Backend (see backend/README.md for .env settings and checkpoints)
 cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload
+cp .env.example .env
+uv run uvicorn main:app --reload
 
-# Frontend setup
-cd frontend
-npm install
-npm run dev
+# Frontend
+cd ../frontend
+pnpm install
+pnpm dev
 ```
 
-(Full setup instructions per module to be added as components come online — see `/docs`.)
+- Backend setup, configuration and the specialist models: [backend/README.md](backend/README.md)
+- Training and evaluating the Change-VQA model: [ml/C_VQA/README.md](ml/C_VQA/README.md)
+- Grounding model: [docs/grounding-module-explained.md](docs/grounding-module-explained.md)
 
 ---
 

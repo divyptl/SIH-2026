@@ -50,6 +50,16 @@
     "image": "છબી {{index}}",
     "georeferenced": "જિયોરેફરન્સ્ડ",
     "gsd": "{{value}} એમ/પિક્સેલ",
+    "changeMask": "માસ્ક બદલો",
+    "maskOpacity": "માસ્કની અસ્પષ્ટતા બદલો",
+    "before": "પહેલાં",
+    "after": "પછી",
+    "divider": "પહેલાં અને પછીની સરખામણી કરવા માટે ખેંચો",
+    "view": {
+      "label": "સરખામણી દૃશ્ય",
+      "swipe": "સ્વાઇપ કરો",
+      "side": "બાજુ-બાજુ"
+    },
     "evidence": "પુરાવા ({{count}})",
     "noSpatial": "છબી પર સ્થાન વિનાની આઇટમ: {{count}}",
     "controllerNotes": "કંટ્રોલરની નોંધો",

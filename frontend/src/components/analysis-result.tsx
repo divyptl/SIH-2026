@@ -1,8 +1,17 @@
 import * as React from 'react'
-import { CircleAlertIcon, CloudIcon, CpuIcon, ListTreeIcon } from 'lucide-react'
+import {
+  ChevronsLeftRightIcon,
+  CircleAlertIcon,
+  CloudIcon,
+  Columns2Icon,
+  CpuIcon,
+  LayersIcon,
+  ListTreeIcon,
+} from 'lucide-react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useTranslation } from 'react-i18next'
 
+import { ChangeSwipe } from '#/components/change-swipe'
 import { EvidenceOverlay } from '#/components/evidence-overlay'
 import { ReportButton } from '#/components/report-button'
 import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
@@ -20,7 +29,7 @@ import {
   SheetTrigger,
 } from '#/components/ui/sheet'
 import { ToggleGroup, ToggleGroupItem } from '#/components/ui/toggle-group'
-import type { AnalysisResponse } from '#/lib/api'
+import type { AnalysisResponse, ImageInfo } from '#/lib/api'
 import { getLanguage } from '#/lib/languages'
 import type { Language } from '#/lib/languages'
 
@@ -45,6 +54,40 @@ function formatGsd(metres: number) {
 
 const ENGLISH: Pick<Language, 'code' | 'dir'> = { code: 'en', dir: 'ltr' }
 
+type CompareView = 'swipe' | 'side'
+
+/** One image's modality, size, resolution and georeferencing. */
+function ImageCaption({
+  info,
+  heading,
+}: {
+  info: ImageInfo
+  heading: string | null
+}) {
+  const { t } = useTranslation()
+  return (
+    // content-start: in a two-column caption row the shorter caption would
+    // otherwise be centred against the taller one.
+    <span className="flex flex-wrap content-start items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+      {heading && (
+        <span className="font-medium text-foreground">{heading}</span>
+      )}
+      <span>{t(`modality.${info.modality}`)}</span>
+      <span className="tabular-nums">
+        {info.width}&times;{info.height}
+      </span>
+      {info.ground_sample_distance_m != null && (
+        <span className="tabular-nums">
+          {t('result.gsd', {
+            value: formatGsd(info.ground_sample_distance_m),
+          })}
+        </span>
+      )}
+      {info.is_georeferenced && <span>{t('result.georeferenced')}</span>}
+    </span>
+  )
+}
+
 export function AnalysisResult({ result, query }: AnalysisResultProps) {
   const { t } = useTranslation()
   const reduceMotion = useReducedMotion()
@@ -61,6 +104,8 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
       ? getLanguage(translation.target_language)
       : null
   const [showEnglish, setShowEnglish] = React.useState(false)
+  const [view, setView] = React.useState<CompareView>('swipe')
+  const [maskOpacity, setMaskOpacity] = React.useState(45)
   const [reportError, setReportError] = React.useState<string | null>(null)
   const localised = localLanguage !== null && !showEnglish
   const lang = localised ? localLanguage : ENGLISH
@@ -94,6 +139,13 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
   // The server renders every input to a browser-displayable JPEG; anything
   // without one cannot be shown (and never has boxes drawn on it).
   const previews = result.inputs.filter((info) => info.preview_data_uri)
+  // Two dates of one place can be swiped between; other pairs stay side by side.
+  const isPair =
+    previews.length === 2 &&
+    result.trace.input_configuration === 'bi_temporal_pair'
+  const hasMask = result.evidence.some(
+    (item) => item.type === 'mask' && item.data,
+  )
   const englishQuery =
     translation && translation.original_query !== translation.english_query
       ? translation.english_query
@@ -193,63 +245,131 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
       {previews.length > 0 && (
         <>
           <Separator />
-          <div
-            className={
-              'px-(--card-spacing) ' +
-              (previews.length > 1 ? 'grid gap-4 sm:grid-cols-2' : 'grid')
-            }
-          >
-            {previews.map((info) => {
-              const forThisImage = result.evidence.filter(
-                (item) => item.image_index === info.index,
-              )
-              return (
-                <figure key={info.index} className="flex flex-col gap-2">
-                  <EvidenceOverlay
-                    src={info.preview_data_uri!}
-                    alt={info.filename}
-                    evidence={forThisImage}
-                    numberOf={(item) => result.evidence.indexOf(item) + 1}
-                    labelOf={(item) => labelOf(result.evidence.indexOf(item))}
-                    labelLang={lang.code}
-                    activeIndex={
-                      activeEvidence !== null
-                        ? forThisImage.indexOf(result.evidence[activeEvidence])
-                        : null
+          {(isPair || hasMask) && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-(--card-spacing)">
+              {isPair && (
+                <ToggleGroup
+                  variant="outline"
+                  size="sm"
+                  aria-label={t('result.view.label')}
+                  value={[view]}
+                  onValueChange={(value: Array<string>) => {
+                    if (value.length > 0) setView(value[0] as CompareView)
+                  }}
+                >
+                  <ToggleGroupItem value="swipe" className="px-2.5">
+                    <ChevronsLeftRightIcon />
+                    {t('result.view.swipe')}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="side" className="px-2.5">
+                    <Columns2Icon />
+                    {t('result.view.side')}
+                  </ToggleGroupItem>
+                </ToggleGroup>
+              )}
+              {hasMask && (
+                <label className="ms-auto flex items-center gap-2 text-xs text-muted-foreground">
+                  <LayersIcon className="size-3.5" />
+                  {t('result.changeMask')}
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={maskOpacity}
+                    onChange={(event) =>
+                      setMaskOpacity(Number(event.target.value))
                     }
-                    onHoverChange={(local) =>
-                      setActiveEvidence(
-                        local === null
-                          ? null
-                          : result.evidence.indexOf(forThisImage[local]),
-                      )
-                    }
+                    aria-label={t('result.maskOpacity')}
+                    className="w-28 accent-fuchsia-500"
                   />
-                  <figcaption className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                    {result.inputs.length > 1 && (
-                      <span className="font-medium text-foreground">
-                        {t('result.image', { index: info.index + 1 })}
-                      </span>
-                    )}
-                    <span>{t(`modality.${info.modality}`)}</span>
-                    <span className="tabular-nums">
-                      {info.width}&times;{info.height}
-                    </span>
-                    {info.ground_sample_distance_m != null && (
-                      <span className="tabular-nums">
-                        {t('result.gsd', {
-                          value: formatGsd(info.ground_sample_distance_m),
-                        })}
-                      </span>
-                    )}
-                    {info.is_georeferenced && (
-                      <span>{t('result.georeferenced')}</span>
-                    )}
-                  </figcaption>
-                </figure>
-              )
-            })}
-          </div>
+                  <span className="w-9 text-end text-foreground tabular-nums">
+                    {maskOpacity}%
+                  </span>
+                </label>
+              )}
+            </div>
+          )}
+
+          {isPair && view === 'swipe' ? (
+            <figure className="flex flex-col gap-2 px-(--card-spacing)">
+              <ChangeSwipe
+                before={{
+                  src: previews[0].preview_data_uri!,
+                  alt: previews[0].filename,
+                  label: t('result.before'),
+                }}
+                after={{
+                  src: previews[1].preview_data_uri!,
+                  alt: previews[1].filename,
+                  label: t('result.after'),
+                }}
+                dividerLabel={t('result.divider')}
+                // The pair shares a footprint, so evidence for either image
+                // marks the same ground.
+                evidence={result.evidence}
+                numberOf={(item) => result.evidence.indexOf(item) + 1}
+                labelOf={(item) => labelOf(result.evidence.indexOf(item))}
+                labelLang={lang.code}
+                maskOpacity={maskOpacity / 100}
+                activeIndex={activeEvidence}
+              />
+              <figcaption className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                <ImageCaption info={previews[0]} heading={t('result.before')} />
+                <ImageCaption info={previews[1]} heading={t('result.after')} />
+              </figcaption>
+            </figure>
+          ) : (
+            <div
+              className={
+                'px-(--card-spacing) ' +
+                (previews.length > 1 ? 'grid gap-4 sm:grid-cols-2' : 'grid')
+              }
+            >
+              {previews.map((info) => {
+                const forThisImage = result.evidence.filter(
+                  (item) => item.image_index === info.index,
+                )
+                return (
+                  <figure key={info.index} className="flex flex-col gap-2">
+                    <EvidenceOverlay
+                      src={info.preview_data_uri!}
+                      alt={info.filename}
+                      evidence={forThisImage}
+                      numberOf={(item) => result.evidence.indexOf(item) + 1}
+                      labelOf={(item) => labelOf(result.evidence.indexOf(item))}
+                      labelLang={lang.code}
+                      maskOpacity={maskOpacity / 100}
+                      activeIndex={
+                        activeEvidence !== null
+                          ? forThisImage.indexOf(
+                              result.evidence[activeEvidence],
+                            )
+                          : null
+                      }
+                      onHoverChange={(local) =>
+                        setActiveEvidence(
+                          local === null
+                            ? null
+                            : result.evidence.indexOf(forThisImage[local]),
+                        )
+                      }
+                    />
+                    <figcaption>
+                      <ImageCaption
+                        info={info}
+                        heading={
+                          result.inputs.length > 1
+                            ? t('result.image', { index: info.index + 1 })
+                            : null
+                        }
+                      />
+                    </figcaption>
+                  </figure>
+                )
+              })}
+            </div>
+          )}
         </>
       )}
 
@@ -260,7 +380,8 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
           </h3>
           <ol className="flex flex-col divide-y rounded-lg border">
             {result.evidence.map((item, index) => {
-              const isSpatial = item.type === 'bbox' && item.data
+              const isSpatial =
+                (item.type === 'bbox' || item.type === 'mask') && item.data
               const label = labelOf(index)
               return (
                 <motion.li

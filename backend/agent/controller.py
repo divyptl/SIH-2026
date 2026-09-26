@@ -161,6 +161,12 @@ def _coerce_evidence(raw: Any, image_count: int) -> list[Evidence]:
                 data = coords
                 kind = "bbox"
 
+        # A change mask from a specialist, as a PNG data URI (never from the VLM).
+        mask = item.get("mask")
+        if kind == "observation" and isinstance(mask, str) and mask.startswith("data:image/png;base64,"):
+            data = {"png": mask}
+            kind = "mask"
+
         label = item.get("label")
         confidence = item.get("confidence")
         evidence.append(

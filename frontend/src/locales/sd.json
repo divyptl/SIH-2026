@@ -50,6 +50,16 @@
     "image": "تصوير {{index}}",
     "georeferenced": "جيو ريفرنسڊ",
     "gsd": "{{value}} m/پکسل",
+    "changeMask": "ماسڪ تبدیل ڪریو",
+    "maskOpacity": "ماسڪ جی اوپیسیٽی تبدیل ڪریو",
+    "before": "ان کان اڳ",
+    "after": "ان کان پوء",
+    "divider": "اڳ ۽ بعد ۾ موازنہ ڪرڻ لاء ڇڪیو",
+    "view": {
+      "label": "موازنہ جو نظارو",
+      "swipe": "سوائپ ڪریو",
+      "side": "پاسی-پاسی"
+    },
     "evidence": "ثبوت ({{count}})",
     "noSpatial": "تصوير تي بنا جاءِ واريون شيون: {{count}}",
     "controllerNotes": "ڪنٽرولر جا نوٽس",
