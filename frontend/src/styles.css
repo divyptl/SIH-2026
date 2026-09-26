@@ -5,6 +5,7 @@
 @import '@fontsource/poppins/500.css';
 @import '@fontsource/poppins/600.css';
 @import '@fontsource/poppins/700.css';
+@import '@fontsource-variable/schibsted-grotesk';
 
 @custom-variant dark (&:is(.dark *));
 
@@ -23,7 +24,11 @@ body {
 }
 
 @theme inline {
-  --font-heading: var(--font-sans);
+  /* Headings: a tighter grotesk than the body face. Scripts it lacks fall
+     through to the same Indic fonts as body text. */
+  --font-heading:
+    'Schibsted Grotesk Variable', 'Poppins', 'Nirmala UI', 'Noto Sans',
+    'Noto Sans Devanagari', system-ui, sans-serif;
   /* Poppins ships Latin and Devanagari glyphs. Other Indic scripts fall
      through per glyph to the platform's Indic UI font: Nirmala UI on Windows,
      Noto on Android/Linux/ChromeOS, and the system font on Apple platforms. */
@@ -151,4 +156,35 @@ body {
   html {
     @apply font-sans;
   }
+}
+
+/* A faint latitude/longitude grid: the ground an image slot waits on. */
+@utility graticule {
+  background-image:
+    linear-gradient(
+      to right,
+      color-mix(in oklab, var(--foreground) 7%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--foreground) 7%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 24px 24px;
+  background-position: -1px -1px;
+}
+
+/* The line that sweeps across images while an analysis runs. */
+@keyframes scan {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@utility animate-scan {
+  animation: scan 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate;
 }

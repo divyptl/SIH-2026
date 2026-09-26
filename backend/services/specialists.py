@@ -205,17 +205,43 @@ def _mask_overlay(mask_prob: np.ndarray, threshold: float) -> str:
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
-    """Answer a change question over a bi-temporal pair with the Siamese Change-VQA model."""
-    specialist = _change_vqa.get()
-    result = specialist.analyze_pair(_pil(images[0]), _pil(images[1]), query)
+def format_km2(area: float) -> str:
+    """An area in km², rounded to the precision a reader can use."""
+    if area < 1:
+        return f"{area:.2f} km²"
+    if area < 10:
+        return f"{area:.1f} km²"
+    return f"{area:.0f} km²"
 
+
+def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
+    """Answer a change question over a bi-temporal pair with the Siamese Change-VQA model.
+
+    Besides the answer and evidence, the payload carries ``narration_facts``:
+    everything the model measured, which the controller hands to the narrator
+    (agent/narration.py) as the only facts it may put into words.
+    """
+    specialist = _change_vqa.get()
+    after = _pil(images[1])
+    result = specialist.analyze_pair(_pil(images[0]), after, query)
+
+    # Ground area of the analysed raster, when the upload is georeferenced.
+    gsd = images[1].analysis_gsd_m
+    scene_km2 = after.width * after.height * gsd**2 / 1e6 if gsd else None
+
+    def measure(share: float, where: str | None = None) -> str:
+        area = f" (about {format_km2(share * scene_km2)})" if scene_km2 else ""
+        text = f"{share:.1%} of the scene{area}"
+        return f"{text}, in {where}" if where else text
+
+    changed_share = result["change_percentage"] / 100
+    changed = measure(changed_share)
     total = result["total_regions"]
     evidence: list[dict[str, Any]] = [
         {
             "label": "change mask",
             "description": (
-                f"{result['change_percentage']}% of the scene is predicted as changed, "
+                f"{changed[:1].upper()}{changed[1:]} is predicted as changed, "
                 f"in {total} {'region' if total == 1 else 'regions'}."
             ),
             # Shown on the later acquisition, where the change is visible.
@@ -223,16 +249,29 @@ def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
             "mask": _mask_overlay(result["mask_prob"], specialist.config.mask_threshold),
         }
     ]
+    regions: list[dict[str, Any]] = []
     for region in result["bounding_boxes"]:
         x_min, y_min, x_max, y_max = region["normalized_bbox"]
         label = region["label"]
+        where = measure(region["share"], region["sector"])
+        regions.append(
+            {
+                # The number the region carries on screen: its 1-based evidence position.
+                "number": len(evidence) + 1,
+                "evidence_index": len(evidence),
+                "label": label,
+                "label_confidence": region["label_confidence"],
+                "share": region["share"],
+                "area_km2": region["share"] * scene_km2 if scene_km2 else None,
+                "sector": region["sector"],
+                "box": [x_min, y_min, x_max, y_max],
+                "measure": f"{where[:1].upper()}{where[1:]}.",
+            }
+        )
         evidence.append(
             {
                 "label": label,
-                "description": (
-                    f"{label[:1].upper()}{label[1:]}: {region['share']:.1%} of the scene, "
-                    f"in {region['sector']}."
-                ),
+                "description": f"{label[:1].upper()}{label[1:]}: {where}.",
                 # How sure the model is of the label, the figure shown next to it.
                 "confidence": region["label_confidence"],
                 "image_index": 1,
@@ -240,7 +279,20 @@ def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
             }
         )
 
-    return {"answer": result["answer"], "confidence": result["confidence"], "evidence": evidence}
+    return {
+        "answer": result["answer"],
+        "confidence": result["confidence"],
+        "evidence": evidence,
+        "narration_facts": {
+            "model_answer": result["answer"],
+            "model_confidence": result["confidence"],
+            "changed_share": changed_share,
+            "changed_km2": changed_share * scene_km2 if scene_km2 else None,
+            "gsd_m": gsd,
+            "total_regions": total,
+            "regions": regions,
+        },
+    }
 
 
 def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:

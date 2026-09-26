@@ -2,27 +2,21 @@ import * as React from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import {
   CircleAlertIcon,
-  FileImageIcon,
-  ImageUpIcon,
   PaperclipIcon,
-  PlusIcon,
   RotateCcwIcon,
   ScanSearchIcon,
-  XIcon,
 } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
-import { cn } from 'cn'
 import { useTranslation } from 'react-i18next'
 
 import { AnalysisPending } from '#/components/analysis-pending'
 import { AnalysisResult } from '#/components/analysis-result'
+import { EmptySlot, FilledSlot, formatBytes } from '#/components/image-slot'
 import { PromptSuggestions } from '#/components/prompt-suggestions'
 import { Hero } from '#/components/hero'
 import { ResultEmpty } from '#/components/result-empty'
 import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
-import { Badge } from '#/components/ui/badge'
 import { Button } from '#/components/ui/button'
-import { Card } from '#/components/ui/card'
 import {
   Field,
   FieldDescription,
@@ -47,21 +41,8 @@ const ACCEPTED_EXTENSIONS = ['.tif', '.tiff', '.png', '.jpg', '.jpeg']
 // The picker needs both: some systems report no MIME type at all for GeoTIFF.
 const ACCEPT_ATTRIBUTE = [...ACCEPTED_TYPES, ...ACCEPTED_EXTENSIONS].join(',')
 
-/** Short format label for an attached file, from its extension. */
-function formatLabel(file: File) {
-  const extension = file.name.toLowerCase().split('.').pop() ?? ''
-  if (extension === 'png') return 'PNG'
-  if (extension === 'jpg' || extension === 'jpeg') return 'JPEG'
-  return 'TIFF'
-}
 const MAX_FILE_SIZE = 20 * 1024 * 1024
 const MAX_IMAGES = 2
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
 
 /** Accept on MIME type, falling back to extension when the type is missing. */
 function isAcceptedImage(file: File) {
@@ -173,10 +154,8 @@ function Home() {
     setError(null)
     setApiError(null)
     setResult(null)
-    // On narrow screens the result panel sits below the form.
-    if (window.matchMedia('(max-width: 1023px)').matches) {
-      resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
+    // The result sits below the input panel; bring it into view.
+    resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 
     const query = prompt.trim()
     try {
@@ -212,118 +191,87 @@ function Home() {
     <main>
       <Hero />
 
-      <div className="mx-auto grid max-w-6xl gap-6 px-4 pb-16 sm:px-6 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)] lg:items-start lg:gap-8">
-        <Card className="lg:sticky lg:top-20">
-          <form
-            onSubmit={handleSubmit}
-            className="flex flex-col gap-6 px-(--card-spacing)"
+      <div className="mx-auto flex max-w-6xl flex-col gap-12 px-4 pb-20 sm:px-6">
+        <form
+          onSubmit={handleSubmit}
+          className="grid overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]"
+        >
+          <Field
+            data-invalid={error ? true : undefined}
+            className="gap-3 p-4 sm:p-5"
           >
-            <Field data-invalid={error ? true : undefined} className="gap-3">
-              <FieldLabel htmlFor="image">{t('home.imagesLabel')}</FieldLabel>
+            <FieldLabel htmlFor="image" className="font-heading text-base">
+              {t('home.imagesLabel')}
+            </FieldLabel>
 
-              <input
-                ref={inputRef}
-                id="image"
-                name="image"
-                type="file"
-                accept={ACCEPT_ATTRIBUTE}
-                multiple={files.length < MAX_IMAGES - 1}
-                aria-required
-                className="sr-only"
-                onChange={(e) => {
-                  addFiles(Array.from(e.target.files ?? []))
-                  e.target.value = ''
-                }}
-              />
+            <input
+              ref={inputRef}
+              id="image"
+              name="image"
+              type="file"
+              accept={ACCEPT_ATTRIBUTE}
+              multiple={files.length < MAX_IMAGES - 1}
+              aria-required
+              className="sr-only"
+              onChange={(e) => {
+                addFiles(Array.from(e.target.files ?? []))
+                e.target.value = ''
+              }}
+            />
 
-              <AnimatePresence initial={false}>
-                {files.map((f, index) => (
-                  <motion.div
-                    key={`${f.name}-${f.size}-${f.lastModified}`}
-                    layout
-                    initial={{ opacity: 0, y: -6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, x: 12 }}
-                    transition={{ duration: 0.18 }}
-                    className="flex items-center gap-3 rounded-lg border p-2"
-                  >
-                    <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                      <FileImageIcon className="size-4" />
-                    </div>
-                    <div className="flex min-w-0 flex-col gap-0.5">
-                      <span className="truncate text-sm font-medium" dir="auto">
-                        {f.name}
-                      </span>
-                      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                        <Badge
-                          variant="secondary"
-                          className="h-4 px-1.5 text-[10px]"
-                        >
-                          {formatLabel(f)}
-                        </Badge>
-                        <span className="tabular-nums">
-                          {formatBytes(f.size)}
-                        </span>
-                      </span>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={t('home.remove', { name: f.name })}
-                      className="ms-auto"
-                      onClick={() => removeFile(index)}
+            <div className="grid grid-cols-2 gap-3">
+              {Array.from({ length: MAX_IMAGES }, (_, slot) => {
+                const file = files.at(slot)
+                return (
+                  <AnimatePresence key={slot} mode="popLayout" initial={false}>
+                    <motion.div
+                      key={
+                        file
+                          ? `${file.name}-${file.size}-${file.lastModified}`
+                          : 'empty'
+                      }
+                      initial={{ opacity: 0, scale: 0.97 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.97 }}
+                      transition={{ duration: 0.18 }}
                     >
-                      <XIcon />
-                    </Button>
-                  </motion.div>
-                ))}
-              </AnimatePresence>
+                      {file ? (
+                        <FilledSlot
+                          file={file}
+                          // Browsers cannot show GeoTIFF; after an analysis the
+                          // server's rendering of it can stand in.
+                          serverPreview={
+                            result?.inputs.find(
+                              (info) => info.filename === file.name,
+                            )?.preview_data_uri
+                          }
+                          onRemove={() => removeFile(slot)}
+                        />
+                      ) : (
+                        <EmptySlot
+                          primary={slot === 0}
+                          isDragging={isDragging}
+                          dropHandlers={dropHandlers}
+                          onPick={() => inputRef.current?.click()}
+                        />
+                      )}
+                    </motion.div>
+                  </AnimatePresence>
+                )
+              })}
+            </div>
 
-              {files.length < MAX_IMAGES && (
-                <button
-                  type="button"
-                  {...dropHandlers}
-                  onClick={() => inputRef.current?.click()}
-                  className={cn(
-                    'flex w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-4 text-center transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none',
-                    files.length === 0 ? 'py-8' : 'py-3',
-                    isDragging && 'border-foreground bg-muted',
-                  )}
-                >
-                  {files.length === 0 ? (
-                    <>
-                      <span className="flex size-9 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                        <ImageUpIcon className="size-4" />
-                      </span>
-                      <span className="text-sm font-medium">
-                        {isDragging
-                          ? t('home.dropToAttach')
-                          : t('home.dropHere')}
-                      </span>
-                      <span className="max-w-xs text-xs/relaxed text-muted-foreground">
-                        {t('home.browseHint')}
-                      </span>
-                    </>
-                  ) : (
-                    <span className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <PlusIcon className="size-4 shrink-0" />
-                      {isDragging
-                        ? t('home.dropToAttach')
-                        : t('home.addSecond')}
-                    </span>
-                  )}
-                </button>
-              )}
+            <FieldDescription className="text-xs/relaxed">
+              {t('home.imagesHelp', { size: formatBytes(MAX_FILE_SIZE) })}
+            </FieldDescription>
+            {error ? <FieldError>{error}</FieldError> : null}
+          </Field>
 
-              <FieldDescription className="text-xs/relaxed">
-                {t('home.imagesHelp', { size: formatBytes(MAX_FILE_SIZE) })}
-              </FieldDescription>
-              {error ? <FieldError>{error}</FieldError> : null}
-            </Field>
-
+          <div className="flex flex-col gap-5 border-t p-4 sm:p-5 lg:border-s lg:border-t-0">
             <Field className="gap-3">
-              <FieldLabel htmlFor="prompt">{t('home.promptLabel')}</FieldLabel>
+              <FieldLabel htmlFor="prompt" className="font-heading text-base">
+                {t('home.promptLabel')}
+              </FieldLabel>
               <InputGroup>
                 <InputGroupTextarea
                   ref={promptRef}
@@ -342,7 +290,7 @@ function Home() {
                   placeholder={t('home.promptPlaceholder')}
                   aria-required
                   aria-describedby="prompt-hint"
-                  className="min-h-24"
+                  className="min-h-28 text-base"
                 />
                 <InputGroupAddon align="block-end">
                   <InputGroupButton
@@ -373,7 +321,7 @@ function Home() {
               </FieldDescription>
             </Field>
 
-            <div className="flex items-center gap-2 border-t pt-4">
+            <div className="mt-auto flex items-center gap-2 border-t pt-4">
               <Button
                 type="button"
                 variant="ghost"
@@ -383,7 +331,12 @@ function Home() {
                 <RotateCcwIcon data-icon="inline-start" />
                 {t('home.reset')}
               </Button>
-              <Button type="submit" disabled={!canSubmit} className="ms-auto">
+              <Button
+                type="submit"
+                size="lg"
+                disabled={!canSubmit}
+                className="ms-auto px-5"
+              >
                 {isAnalysing ? (
                   <Spinner data-icon="inline-start" />
                 ) : (
@@ -392,8 +345,8 @@ function Home() {
                 {isAnalysing ? t('home.analyzing') : t('home.analyze')}
               </Button>
             </div>
-          </form>
-        </Card>
+          </div>
+        </form>
 
         <section
           ref={resultRef}
@@ -409,7 +362,7 @@ function Home() {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
               >
-                <AnalysisPending fileCount={files.length} />
+                <AnalysisPending files={files} />
               </motion.div>
             ) : apiError ? (
               <motion.div

@@ -63,7 +63,13 @@ export interface ImageInfo {
 
 export interface TraceStep {
   stage:
-    'translate' | 'validate' | 'classify' | 'select' | 'execute' | 'aggregate'
+    | 'translate'
+    | 'validate'
+    | 'classify'
+    | 'select'
+    | 'execute'
+    | 'narrate'
+    | 'aggregate'
   tool: string
   model: string | null
   params: Record<string, unknown>
@@ -112,6 +118,17 @@ export interface TranslationInfo {
   routing_rationale?: string | null
 }
 
+/**
+ * A VLM's plain-language rewording of a specialist result. The wording is the
+ * VLM's; every region and figure in it was checked against the specialist.
+ */
+export interface Narration {
+  model: string
+  /** The specialist's own answer, before rewording. */
+  specialist_answer: string
+  regions_described: number
+}
+
 export interface AnalysisResponse {
   request_id: string
   task: Task
@@ -124,6 +141,8 @@ export interface AnalysisResponse {
   trace: ExecutionTrace
   usage: Usage | null
   translation: TranslationInfo | null
+  /** Set when a VLM reworded the specialist's result in plain language. */
+  narration?: Narration | null
 }
 
 /** An error carrying the HTTP status, so callers can distinguish causes. */

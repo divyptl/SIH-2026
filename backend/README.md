@@ -60,6 +60,8 @@ All settings are environment variables, read from `backend/.env`.
 | `FUSION_CHECKPOINT` | `checkpoints/fusion_best.pt` | Optical–SAR fusion model. |
 | `SPECIALIST_DEVICE` | `auto` | Device for the specialists: `auto`, `cpu`, `cuda:1`, … |
 | `SPECIALIST_PRELOAD` | `false` | Load the specialists at startup instead of on their first request. |
+| `NARRATION_ENABLED` | `true` | Reword Change-VQA results in plain language with the VLM (see [Plain-language narration](#plain-language-narration)). |
+| `OPENROUTER_NARRATION_MODEL` | vision model | Model that writes the plain-language text. Must accept images. |
 
 Settings are read once at startup: restart the server after editing `.env`
 (`--reload` only watches code).
@@ -233,6 +235,34 @@ Behaviour worth knowing:
   trace records the error.
 - **Confidence** is the model's own estimate (softmax probability or
   detection score), reported as-is.
+
+### Plain-language narration
+
+The Change-VQA model's own wording ("bare ground to water", "33.5% of the
+scene, in the south sector") is exact but hard for non-specialists to read. So
+after it runs, [`agent/narration.py`](agent/narration.py) has the VLM reword it:
+
+1. The VLM is shown both images with the model's regions drawn as numbered
+   boxes, plus the model's facts: its answer, the changed share and area
+   (km², when the upload is georeferenced), and each region's label, size and
+   direction.
+2. It returns a short summary and, for each region, what the ground looks like
+   before and after and one sentence on what changed.
+3. The reply is checked before anything is shown. It is **discarded** if it
+   describes a region number the model did not report, contains a figure that
+   is not one of the model's (within rounding), or places something in a
+   direction where the model found no region.
+
+If accepted, it replaces the answer and the region descriptions (the model's
+size and location stay appended to each); the response sets `narration` with
+the VLM's name and the model's original answer, and the trace gains a
+`narrate` step. If discarded, or if OpenRouter fails, the model's own wording
+is shown and `trace.warnings` says why. `trace.domain_adapted` is unchanged:
+the regions, figures and confidence all come from the fine-tuned model.
+
+The check covers numbers written as digits, region numbers and compass
+directions; it cannot verify the VLM's visual words ("sandbanks", "muddy
+water"), which are exactly what it is there to add.
 
 To add a specialist: write a runner in
 [`services/specialists.py`](services/specialists.py) that takes

@@ -20,6 +20,7 @@ import time
 import uuid
 from typing import Any
 
+from agent.narration import NarrationRejected, narrate
 from agent.prompts import (
     ROUTER_SYSTEM_PROMPT,
     analysis_system_prompt,
@@ -37,6 +38,7 @@ from schemas import (
     Evidence,
     ExecutionTrace,
     InputConfiguration,
+    Narration,
     Task,
     TraceStep,
     Usage,
@@ -341,7 +343,18 @@ class AgenticController:
             )
         )
 
-        # --- 5. Aggregate outputs and confidence ------------------------------
+        # --- 5. Put a specialist's findings into plain language ---------------
+        narration: Narration | None = None
+        facts = payload.pop("narration_facts", None)
+        if facts and facts["regions"] and self._settings.narration_enabled:
+            narration, narration_usage = await self._narrate(
+                query=query, images=images, payload=payload, facts=facts,
+                steps=steps, warnings=warnings,
+            )
+            if narration_usage and not usage:
+                usage = narration_usage
+
+        # --- 6. Aggregate outputs and confidence ------------------------------
         step_timer = _Timer()
         answer = str(payload.get("answer") or "").strip()
         if not answer:
@@ -386,6 +399,80 @@ class AgenticController:
                 warnings=warnings,
             ),
             usage=Usage(**usage) if usage else None,
+            narration=narration,
+        )
+
+    async def _narrate(
+        self,
+        *,
+        query: str,
+        images: list[PreparedImage],
+        payload: dict[str, Any],
+        facts: dict[str, Any],
+        steps: list[TraceStep],
+        warnings: list[str],
+    ) -> tuple[Narration | None, dict[str, Any]]:
+        """Replace the specialist's terse wording with a checked plain-language version.
+
+        On any failure the specialist's own answer and descriptions stay as they
+        are; the trace and the warnings say why.
+        """
+        step_timer = _Timer()
+        model = self._settings.narration_model
+        specialist_answer = str(payload.get("answer") or "")
+        try:
+            result = await narrate(
+                self._client, model=model, query=query, images=images, facts=facts
+            )
+        except (NarrationRejected, OpenRouterError) as exc:
+            reason = (
+                str(exc) if isinstance(exc, NarrationRejected)
+                else "the language model could not be reached"
+            )
+            warnings.append(
+                f"The plain-language summary was discarded because {reason}; "
+                "the fine-tuned model's own wording is shown instead."
+            )
+            steps.append(
+                TraceStep(
+                    stage="narrate",
+                    tool="plain-language-narrator",
+                    model=model,
+                    params={"regions": len(facts["regions"])},
+                    detail=f"Narration discarded: {exc}",
+                    duration_ms=step_timer.ms(),
+                )
+            )
+            return None, {}
+
+        payload["answer"] = result.summary
+        by_number = {region["number"]: region for region in facts["regions"]}
+        for number, text in result.regions.items():
+            region = by_number[number]
+            payload["evidence"][region["evidence_index"]]["description"] = (
+                f"{text} {region['measure']}"
+            )
+        steps.append(
+            TraceStep(
+                stage="narrate",
+                tool="plain-language-narrator",
+                model=model,
+                params={"regions": len(facts["regions"]), "temperature": 0.2},
+                detail=(
+                    f"Reworded the specialist's answer (\"{specialist_answer}\") and "
+                    f"{len(result.regions)} region description(s); every region, figure "
+                    "and direction was checked against the specialist's output."
+                ),
+                duration_ms=step_timer.ms(),
+            )
+        )
+        return (
+            Narration(
+                model=model,
+                specialist_answer=specialist_answer,
+                regions_described=len(result.regions),
+            ),
+            result.usage,
         )
 
     async def _classify(

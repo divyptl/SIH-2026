@@ -89,7 +89,9 @@ class ImageInfo(BaseModel):
 class TraceStep(BaseModel):
     """One observable step of the agentic execution trace."""
 
-    stage: Literal["translate", "validate", "classify", "select", "execute", "aggregate"]
+    stage: Literal[
+        "translate", "validate", "classify", "select", "execute", "narrate", "aggregate"
+    ]
     tool: str
     model: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
@@ -161,6 +163,18 @@ class TranslationInfo(BaseModel):
     )
 
 
+class Narration(BaseModel):
+    """Set when a VLM reworded a specialist's result in plain language.
+
+    The wording is the VLM's; every region and figure in it is the specialist's,
+    checked before the text is accepted (agent/narration.py).
+    """
+
+    model: str = Field(description="The VLM that wrote the plain-language text.")
+    specialist_answer: str = Field(description="The specialist's own answer, as it produced it.")
+    regions_described: int = 0
+
+
 class AnalysisResponse(BaseModel):
     """Evidence-grounded response returned to the client."""
 
@@ -175,6 +189,7 @@ class AnalysisResponse(BaseModel):
     trace: ExecutionTrace
     usage: Usage | None = None
     translation: TranslationInfo | None = None
+    narration: Narration | None = None
 
 
 class ReportLabels(BaseModel):

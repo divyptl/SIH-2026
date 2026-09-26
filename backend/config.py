@@ -117,6 +117,12 @@ class Settings:
         # Load the specialists at startup instead of on their first request.
         self.specialist_preload: bool = _flag("SPECIALIST_PRELOAD", "false")
 
+        # Plain-language narration of the Change-VQA result (agent/narration.py):
+        # the VLM rewords the specialist's regions and measurements for non-expert
+        # readers, and is rejected if it adds a region, number or place of its own.
+        self.narration_enabled: bool = _flag("NARRATION_ENABLED", "true")
+        self.narration_model: str = os.getenv("OPENROUTER_NARRATION_MODEL", self.vision_model)
+
         self.cors_origins: list[str] = _csv(
             "CORS_ORIGINS",
             "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173",

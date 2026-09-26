@@ -11,13 +11,13 @@
     "allLanguages": "All languages"
   },
   "home": {
-    "title": "Let’s analyze your image!",
-    "subtitle": "Upload a SAR or optical capture and ask anything about what it shows.",
+    "title": "Ask a satellite image a question.",
+    "subtitle": "Add one image, or two of the same place, and ask in your own language. You get a plain answer, with the evidence marked on the image.",
     "imagesLabel": "Images",
     "dropToAttach": "Drop to attach",
     "addSecond": "Add a second image (optical+SAR pair or before/after)",
     "dropHere": "Drop images here",
-    "browseHint": "or click to browse — one image, or two for a cross-modal / bi-temporal pair",
+    "browseHint": "or click to choose a GeoTIFF, PNG or JPEG",
     "imagesHelp": "Required. One image (GeoTIFF, PNG or JPEG), or two for a co-registered optical+SAR pair or before/after comparison — each up to {{size}}.",
     "previewAlt": "Preview of {{name}}",
     "remove": "Remove {{name}}",
@@ -33,7 +33,10 @@
     "analyzing": "Analyzing…",
     "analysisFailed": "Analysis failed",
     "genericError": "Something went wrong running the analysis.",
-    "running": "Routing the query and running the selected specialist…"
+    "running": "Routing the query and running the selected specialist…",
+    "tiffPreview": "GeoTIFF preview appears after the analysis",
+    "secondSlot": "Add a second image",
+    "secondSlotHint": "Optional: the same place on another date, or its radar (SAR) image"
   },
   "errors": {
     "tooManyFull": "Up to {{max}} images per analysis (a cross-modal or bi-temporal pair). Remove one first.",
@@ -77,7 +80,8 @@
       "baselineHint": "Answered by a general-purpose vision-language model, not one fine-tuned for remote sensing."
     },
     "tokens": "Tokens",
-    "region": "Region {{index}}"
+    "region": "Region {{index}}",
+    "narration": "Worded in plain language by {{model}}. Every changed area and figure comes from the fine-tuned model and was checked before showing."
   },
   "task": {
     "vqa": "Visual question answering",
@@ -165,5 +169,20 @@
       "Have new ships arrived in the harbour?",
       "Describe the differences between the two images."
     ]
+  },
+  "guide": {
+    "title": "What you can ask about",
+    "single": {
+      "title": "One image",
+      "body": "Ask what it shows: count ships in a harbour, find flooded fields, or get a description of the area."
+    },
+    "pair": {
+      "title": "Two dates, one place",
+      "body": "See what changed between them, such as new buildings, flood water or cleared forest, with the changed ground marked."
+    },
+    "fusion": {
+      "title": "Optical and radar together",
+      "body": "Combine a normal photo with a radar (SAR) image of the same place. Radar sees through cloud, so both together tell you more."
+    }
   }
 }
