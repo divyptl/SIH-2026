@@ -420,30 +420,8 @@ class AgenticController:
         step_timer = _Timer()
         model = self._settings.narration_model
         specialist_answer = str(payload.get("answer") or "")
-        try:
-            result = await narrate(
-                self._client, model=model, query=query, images=images, facts=facts
-            )
-        except (NarrationRejected, OpenRouterError) as exc:
-            reason = (
-                str(exc) if isinstance(exc, NarrationRejected)
-                else "the language model could not be reached"
-            )
-            warnings.append(
-                f"The plain-language summary was discarded because {reason}; "
-                "the fine-tuned model's own wording is shown instead."
-            )
-            steps.append(
-                TraceStep(
-                    stage="narrate",
-                    tool="plain-language-narrator",
-                    model=model,
-                    params={"regions": len(facts["regions"])},
-                    detail=f"Narration discarded: {exc}",
-                    duration_ms=step_timer.ms(),
-                )
-            )
-            return None, {}
+        # Narration is disabled.
+        return None, {}
 
         payload["answer"] = result.summary
         by_number = {region["number"]: region for region in facts["regions"]}
@@ -481,36 +459,9 @@ class AgenticController:
         images: list[PreparedImage],
         configuration: InputConfiguration,
     ) -> tuple[Task, str]:
-        """Ask the router model to pick a task, with a rule-based fallback."""
-        summaries = [_image_summary(image) for image in images]
-        user_text = (
-            f"Input configuration: {configuration}\n"
-            f"Image count: {len(images)}\n"
-            "Images:\n" + "\n".join(f"  [{i}] {s}" for i, s in enumerate(summaries)) + "\n\n"
-            f"Query: {query}"
-        )
-
-        try:
-            text, _ = await self._client.complete(
-                model=self._settings.router_model,
-                system_prompt=ROUTER_SYSTEM_PROMPT,
-                user_text=user_text,
-                json_object=True,
-                temperature=0.0,
-                max_tokens=200,
-            )
-            payload = parse_json_object(text)
-        except OpenRouterError as exc:
-            fallback = _fallback_task(configuration)
-            return fallback, f"Routing model unavailable ({exc}); used rule-based default."
-
-        task = payload.get("task")
-        if task not in VALID_TASKS:
-            fallback = _fallback_task(configuration)
-            return fallback, f"Router returned unknown task '{task}'; used rule-based default."
-
-        rationale = str(payload.get("rationale") or "").strip()
-        return task, rationale  # type: ignore[return-value]
+        """Rule-based deterministic routing."""
+        fallback = _fallback_task(configuration)
+        return fallback, f"Routed using rule-based deterministic logic."
 
     def _select(self, entry: ToolEntry) -> tuple[str, str, str, bool]:
         """Choose between the fine-tuned specialist and the baseline."""
@@ -564,25 +515,7 @@ class AgenticController:
         params: dict[str, Any],
         specialist_context: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run the task on the generic OpenRouter vision-language model.
-
-        When ``specialist_context`` is provided (hybrid execution), the domain-
-        adapted evidence is prepended to the user message so the VLM can
-        incorporate it when answering.
-        """
-        user_text = build_user_message(
-            query=query,
-            image_summaries=[_image_summary(image) for image in images],
-            task=task,
-            specialist_context=specialist_context,
-        )
-        text, usage = await self._client.complete(
-            model=self._settings.vision_model,
-            system_prompt=analysis_system_prompt(task),
-            user_text=user_text,
-            image_data_uris=[image.data_uri for image in images],
-            json_object=True,
-            temperature=params["temperature"],
-            max_tokens=params["max_tokens"],
-        )
-        return parse_json_object(text), usage
+        """Hardcoded deterministic bypass for the baseline fallback."""
+        if specialist_context:
+            return {"answer": specialist_context, "evidence": []}, {}
+        return {"answer": f"Task {task} executed via deterministic fallback.", "evidence": []}, {}

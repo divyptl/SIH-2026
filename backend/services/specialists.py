@@ -353,20 +353,20 @@ def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
         },
     ]
 
-    # Structured context the VLM will receive in its prompt.
-    specialist_context = (
-        f"A fine-tuned optical-SAR dual encoder (terrain classifier) reports: "
-        f"{terrain_summary}. "
-        f"Top prediction: {TERRAIN_NAMES.get(terrain, terrain)} ({confidence:.0%}). "
-        f"Optical\u2013SAR embedding cosine similarity: {similarity:.2f}. "
-        f"NDWI water analysis: mean NDWI = {ndwi_mean:.3f}, "
-        f"{ndwi_water_pct:.0%} of optical pixels indicate water (NDWI > 0). "
-        f"SAR low-backscatter water mask: {sar_water_pct:.0%} of pixels are smooth water."
+    # Format final answer locally
+    best_terrain_name = TERRAIN_NAMES.get(terrain, terrain)
+    answer = (
+        f"Based on the fused optical and SAR analysis, this region is classified as **{best_terrain_name}** "
+        f"with {confidence:.0%} confidence.\n\n"
+        f"**Supporting Analysis:**\n"
+        f"- The optical and SAR embeddings have a cosine similarity of {similarity:.2f}.\n"
+        f"- NDWI analysis shows {ndwi_water_pct:.0%} of the area is water (mean NDWI: {ndwi_mean:.3f}).\n"
+        f"- SAR backscatter mask shows {sar_water_pct:.0%} of the area is smooth water.\n"
+        f"Top predicted terrains: {terrain_summary}."
     )
 
     return {
-        "answer": None,  # signals the controller to augment with VLM
+        "answer": answer,
         "confidence": confidence,
         "evidence": evidence,
-        "specialist_context": specialist_context,
     }
