@@ -14,6 +14,8 @@ Internal planning is not part of the contract -- only the observable trace is.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 import uuid
 from typing import Any
@@ -45,6 +47,8 @@ from services.openrouter_client import (
     OpenRouterError,
     parse_json_object,
 )
+
+logger = logging.getLogger("satquery.controller")
 
 VALID_TASKS: set[str] = set(TOOL_REGISTRY)
 
@@ -261,16 +265,34 @@ class AgenticController:
 
         # --- 4. Execute -------------------------------------------------------
         step_timer = _Timer()
-        params = {"temperature": 0.2, "max_tokens": 1400}
-        payload, usage = await self._execute(
-            task=task, query=query, images=images, params=params
-        )
+        payload: dict[str, Any] | None = None
+        usage: dict[str, Any] = {}
+        params: dict[str, Any]
+        if entry.runner is not None:
+            params = {"checkpoint": entry.checkpoint}
+            try:
+                payload = await asyncio.to_thread(entry.runner, query, images)
+            except Exception as exc:
+                # A broken specialist must not take the request down with it; the
+                # trace says plainly that the baseline answered instead.
+                logger.exception("Specialist '%s' failed; using the baseline", tool_name)
+                warnings.append(
+                    f"The fine-tuned specialist for '{task}' failed ({exc}); "
+                    "the generic VLM baseline answered instead."
+                )
+                tool_name, backend, model_name, domain_adapted = self._baseline(entry)
+
+        if payload is None:
+            params = {"temperature": 0.2, "max_tokens": 1400}
+            payload, usage = await self._execute_baseline(
+                task=task, query=query, images=images, params=params
+            )
         steps.append(
             TraceStep(
                 stage="execute",
                 tool=tool_name,
                 model=model_name,
-                params=params,
+                params={"backend": backend, **params},
                 detail=f"Ran {task} over {len(images)} image(s).",
                 duration_ms=step_timer.ms(),
             )
@@ -363,10 +385,13 @@ class AgenticController:
     def _select(self, entry: ToolEntry) -> tuple[str, str, str, bool]:
         """Choose between the fine-tuned specialist and the baseline."""
         if entry.specialist_available:
-            return entry.name, "local_specialist", entry.specialist_module, True
-        return entry.name, "openrouter", self._settings.vision_model, False
+            return entry.name, "local_specialist", entry.specialist_model, True
+        return self._baseline(entry)
 
-    async def _execute(
+    def _baseline(self, entry: ToolEntry) -> tuple[str, str, str, bool]:
+        return f"{entry.name}-baseline", "openrouter", self._settings.vision_model, False
+
+    async def _execute_baseline(
         self,
         *,
         task: Task,
@@ -374,13 +399,7 @@ class AgenticController:
         images: list[PreparedImage],
         params: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        entry = TOOL_REGISTRY[task]
-        if entry.specialist_available:
-            raise ControllerError(
-                f"Specialist for '{task}' is registered but its execution path is not "
-                "implemented yet."
-            )
-
+        """Run the task on the generic OpenRouter vision-language model."""
         user_text = build_user_message(
             query=query,
             image_summaries=[_image_summary(image) for image in images],

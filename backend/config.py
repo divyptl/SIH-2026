@@ -8,14 +8,34 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Relative checkpoint paths resolve against the repository root, not the working
+# directory, so the server finds them wherever it is started from.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 def _csv(name: str, default: str) -> list[str]:
     return [part.strip() for part in os.getenv(name, default).split(",") if part.strip()]
+
+
+def _flag(name: str, default: str) -> bool:
+    return os.getenv(name, default).lower() in {"1", "true", "yes"}
+
+
+def _repo_path(value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def _checkpoint(name: str, default: str) -> Path | None:
+    """A checkpoint path setting; set it to an empty value to disable that specialist."""
+    value = os.getenv(name, default).strip()
+    return _repo_path(value) if value else None
 
 
 class Settings:
@@ -70,6 +90,32 @@ class Settings:
             "true",
             "yes",
         }
+
+        # Fine-tuned specialists from ml/ (services/specialists.py). A task uses its
+        # specialist when the checkpoint exists, and the OpenRouter baseline otherwise.
+        # SPECIALISTS_ENABLED=false forces the baseline everywhere, for comparison.
+        self.specialists_enabled: bool = _flag("SPECIALISTS_ENABLED", "true")
+        self.grounding_checkpoint: Path | None = _checkpoint(
+            "GROUNDING_CHECKPOINT", "checkpoints/grounding/v1/best.pt"
+        )
+        # "auto" uses every reranker*.pt beside the grounding checkpoint (they are
+        # trained on that checkpoint's candidates); empty disables re-ranking.
+        rerankers = os.getenv("GROUNDING_RERANKERS", "auto").strip()
+        self.grounding_rerankers: list[Path] | None = (
+            None if rerankers.lower() == "auto" else [_repo_path(p) for p in _csv("GROUNDING_RERANKERS", "")]
+        )
+        # Trained on LEVIR-CD (0.5 m aerial, building change): expect little signal
+        # from coarse imagery such as 10 m Sentinel-2 or from non-building change.
+        self.change_vqa_checkpoint: Path | None = _checkpoint(
+            "CHANGE_VQA_CHECKPOINT", "checkpoints/c_vqa_best.pt"
+        )
+        self.fusion_checkpoint: Path | None = _checkpoint(
+            "FUSION_CHECKPOINT", "checkpoints/fusion_best.pt"
+        )
+        # "auto" picks CUDA when available, else CPU. Also accepts "cpu", "cuda:1", ...
+        self.specialist_device: str = os.getenv("SPECIALIST_DEVICE", "auto")
+        # Load the specialists at startup instead of on their first request.
+        self.specialist_preload: bool = _flag("SPECIALIST_PRELOAD", "false")
 
         self.cors_origins: list[str] = _csv(
             "CORS_ORIGINS",

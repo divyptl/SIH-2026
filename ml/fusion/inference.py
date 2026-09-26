@@ -127,13 +127,13 @@ class FusionModel:
 
     def _load_and_preprocess(
         self,
-        image_path: str | Path,
+        image: str | Path | "Image.Image",
         modality: str,
     ) -> torch.Tensor:
         """Load an image and preprocess it for the model.
 
         Args:
-            image_path: Path to the image file.
+            image: Path to the image file, or an already-open PIL image.
             modality: 'sar' or 'optical'.
 
         Returns:
@@ -146,7 +146,10 @@ class FusionModel:
 
         grayscale = modality == "sar"
         mode = "L" if grayscale else "RGB"
-        img = Image.open(image_path).convert(mode)
+        if isinstance(image, Image.Image):
+            img = image.convert(mode)
+        else:
+            img = Image.open(image).convert(mode)
 
         # To tensor (0-1 range)
         arr = np.array(img, dtype=np.float32) / 255.0
@@ -167,8 +170,8 @@ class FusionModel:
         return tensor.unsqueeze(0).to(self.device)  # (1, C, H, W)
 
     def _prepare_tensor(self, image, modality: str) -> torch.Tensor:
-        """Accept either a file path or a pre-loaded tensor."""
-        if isinstance(image, (str, Path)):
+        """Accept a file path, a PIL image, or a pre-loaded tensor."""
+        if isinstance(image, (str, Path)) or (Image is not None and isinstance(image, Image.Image)):
             return self._load_and_preprocess(image, modality)
         elif isinstance(image, torch.Tensor):
             # Assume already preprocessed, just add batch dim if needed
@@ -176,7 +179,7 @@ class FusionModel:
                 image = image.unsqueeze(0)
             return image.to(self.device)
         else:
-            raise TypeError(f"Expected str, Path, or Tensor, got {type(image)}")
+            raise TypeError(f"Expected str, Path, PIL Image, or Tensor, got {type(image)}")
 
     # ── Core operations ──────────────────────────────────────────────────
 

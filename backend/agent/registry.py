@@ -6,17 +6,25 @@ in. ``domain_adapted`` is what distinguishes the two: the problem statement is
 explicit that a generic VLM alone does not satisfy the requirements, so the
 flag is surfaced in the execution trace rather than hidden.
 
-To promote a task to its specialist, implement ``ml/<area>`` against
-``ml.controller.schema.SpecialistModel`` and set ``loader`` on the entry.
+To promote a task to its specialist, add a runner for it to
+``services/specialists.py`` and a checkpoint setting to ``config.py``, then set
+both on the entry below.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from config import get_settings
 from schemas import InputConfiguration, Task, ToolInfo
+from services import specialists
+from services.images import PreparedImage
+
+# Runs a specialist on (query, images) and returns the baseline's payload shape.
+Runner = Callable[[str, list[PreparedImage]], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -31,16 +39,37 @@ class ToolEntry:
     # Module path of the fine-tuned specialist that owns this task once trained.
     specialist_module: str
 
-    # Set to a callable returning a `SpecialistModel` to activate the specialist.
-    # While None, the controller falls back to the OpenRouter baseline.
-    loader: Callable[[], Any] | None = None
+    # Runs the specialist. While None, the controller uses the OpenRouter baseline.
+    runner: Runner | None = None
+
+    # Human-readable weights the runner serves, for the trace and the registry.
+    checkpoint: str | None = None
 
     # Parameters the controller is permitted to configure for this tool.
     permitted_params: tuple[str, ...] = field(default=("temperature", "max_tokens"))
 
     @property
     def specialist_available(self) -> bool:
-        return self.loader is not None
+        return self.runner is not None
+
+    @property
+    def specialist_model(self) -> str:
+        """The model name reported for a specialist answer."""
+        return f"{self.specialist_module} ({self.checkpoint})"
+
+
+def _specialist(
+    runner: Runner, checkpoint: Path | None, describe: Callable[[Path], str] | None = None
+) -> dict[str, Any]:
+    """Entry fields that activate a specialist whose checkpoint is on disk."""
+    settings = get_settings()
+    if not settings.specialists_enabled or checkpoint is None or not checkpoint.is_file():
+        return {}
+    label = (describe or specialists.checkpoint_label)(checkpoint)
+    return {"runner": runner, "checkpoint": label}
+
+
+_settings = get_settings()
 
 
 TOOL_REGISTRY: dict[Task, ToolEntry] = {
@@ -64,20 +93,27 @@ TOOL_REGISTRY: dict[Task, ToolEntry] = {
         description="Localises the region referred to by the query and returns bounding boxes.",
         accepts=("single",),
         specialist_module="ml.grounding",
+        **_specialist(
+            specialists.run_grounding,
+            _settings.grounding_checkpoint,
+            specialists.describe_grounding,
+        ),
     ),
     "change_vqa": ToolEntry(
         name="rs-change-vqa",
         task="change_vqa",
         description="Answers a question about what changed between two co-located dates.",
         accepts=("bi_temporal_pair",),
-        specialist_module="ml.change_detection",
+        specialist_module="ml.C_VQA",
+        **_specialist(specialists.run_change_vqa, _settings.change_vqa_checkpoint),
     ),
     "change_description": ToolEntry(
         name="rs-change-describer",
         task="change_description",
         description="Describes and localises change between two co-located dates.",
         accepts=("bi_temporal_pair",),
-        specialist_module="ml.change_detection",
+        specialist_module="ml.C_VQA",
+        **_specialist(specialists.run_change_vqa, _settings.change_vqa_checkpoint),
     ),
     "fusion": ToolEntry(
         name="rs-optical-sar-fusion",
@@ -87,6 +123,7 @@ TOOL_REGISTRY: dict[Task, ToolEntry] = {
         ),
         accepts=("cross_modal_pair",),
         specialist_module="ml.fusion",
+        **_specialist(specialists.run_fusion, _settings.fusion_checkpoint),
     ),
 }
 
@@ -106,7 +143,7 @@ def describe_registry(baseline_model: str) -> list[ToolInfo]:
                     task=entry.task,
                     description=entry.description,
                     backend="local_specialist",
-                    model=entry.specialist_module,
+                    model=entry.specialist_model,
                     available=True,
                     domain_adapted=True,
                 )

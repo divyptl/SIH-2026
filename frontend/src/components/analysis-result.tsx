@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { CircleAlertIcon, ListTreeIcon } from 'lucide-react'
+import { CircleAlertIcon, CloudIcon, CpuIcon, ListTreeIcon } from 'lucide-react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useTranslation } from 'react-i18next'
 
@@ -173,6 +173,7 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
             <Badge variant="outline">
               {t(`configuration.${result.trace.input_configuration}`)}
             </Badge>
+            <ModelSourceBadge domainAdapted={result.trace.domain_adapted} />
           </div>
           <span className="ms-auto text-xs text-muted-foreground tabular-nums">
             {formatMs(result.execution_time_ms)}
@@ -298,6 +299,24 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
   )
 }
 
+/**
+ * Whether a fine-tuned remote-sensing specialist or the generic VLM baseline
+ * produced the answer, so a baseline answer is never mistaken for the former.
+ */
+function ModelSourceBadge({ domainAdapted }: { domainAdapted: boolean }) {
+  const { t } = useTranslation()
+  const source = domainAdapted ? 'specialist' : 'baseline'
+  return (
+    <Badge
+      variant={domainAdapted ? 'default' : 'outline'}
+      title={t(`result.source.${source}Hint`)}
+    >
+      {domainAdapted ? <CpuIcon /> : <CloudIcon />}
+      {t(`result.source.${source}`)}
+    </Badge>
+  )
+}
+
 /** Routing, controller notes and the step-by-step trace, out of the way. */
 function TraceSheet({
   result,
@@ -361,6 +380,17 @@ function TraceSheet({
             <dt className="text-muted-foreground">{t('result.tools')}</dt>
             <dd className="font-mono text-xs leading-5">
               {result.trace.selected_tools.join(', ')}
+            </dd>
+            <dt className="text-muted-foreground">{t('result.model')}</dt>
+            <dd>
+              <span className="font-mono text-xs leading-5 break-all">
+                {result.model_name}
+              </span>
+              <p className="mt-1 text-muted-foreground">
+                {t(
+                  `result.source.${result.trace.domain_adapted ? 'specialist' : 'baseline'}Hint`,
+                )}
+              </p>
             </dd>
             {result.usage?.total_tokens != null && (
               <>

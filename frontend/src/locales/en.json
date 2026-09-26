@@ -58,6 +58,13 @@
     "request": "Request",
     "routing": "Routing",
     "tools": "Tools",
+    "model": "Model",
+    "source": {
+      "specialist": "Fine-tuned model",
+      "specialistHint": "Answered by a model fine-tuned on remote-sensing imagery.",
+      "baseline": "General VLM",
+      "baselineHint": "Answered by a general-purpose vision-language model, not one fine-tuned for remote sensing."
+    },
     "tokens": "Tokens",
     "region": "Region {{index}}"
   },

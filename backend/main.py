@@ -18,7 +18,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile, st
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent.controller import AgenticController, ControllerError
-from agent.registry import describe_registry
+from agent.registry import TOOL_REGISTRY, describe_registry
 from config import get_settings
 from schemas import (
     AnalysisResponse,
@@ -36,6 +36,7 @@ from services.images import (
     prepare_upload,
 )
 from services.openrouter_client import OpenRouterClient, OpenRouterError
+from services import specialists
 from services.report import ReportError, render_report
 from services.translation import (
     ENGLISH,
@@ -61,6 +62,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 logger.warning("Translation preload skipped: %s", exc)
 
         threading.Thread(target=_warm, name="translation-preload", daemon=True).start()
+
+    active = {task for task, entry in TOOL_REGISTRY.items() if entry.specialist_available}
+    logger.info("Fine-tuned specialists active for: %s", ", ".join(sorted(active)) or "none")
+    if settings.specialist_preload and active:
+        threading.Thread(
+            target=specialists.preload, args=(active,), name="specialist-preload", daemon=True
+        ).start()
     yield
 
 

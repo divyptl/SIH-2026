@@ -175,205 +175,75 @@ class ChangeVQAModel:
 
         exec_time_ms = (time.perf_counter() - start_time) * 1000.0
 
-        # Model outputs
+        # Everything reported comes from the network: its answer with its top-1
+        # softmax confidence, and its change mask. The mask is not blended with a
+        # raw pixel difference, and the answer is not replaced by keyword rules or
+        # fixed confidences, so callers see what the fine-tuned model predicted.
         answer_text = outputs["predicted_answer_text"][0]
-        mask_prob = outputs["change_mask_prob"][0, 0].cpu().numpy()
+        answer_confidence = float(outputs["answer_confidence"][0])
+        mask_prob = outputs["change_mask_prob"][0, 0].float().cpu().numpy()
 
-        # Extract raw arrays for spectral change analysis and calibration
-        t1_norm = t1_tensor[0].permute(1, 2, 0).cpu().numpy()
-        t2_norm = t2_tensor[0].permute(1, 2, 0).cpu().numpy()
-        pix_diff = np.sqrt(np.mean((t1_norm - t2_norm) ** 2, axis=-1))
-        p_min, p_max = float(pix_diff.min()), float(pix_diff.max())
-        pix_diff_norm = (pix_diff - p_min) / (p_max - p_min + 1e-6)
-
-        # Calibrated change mask combining deep features and spatial difference
-        if mask_prob.max() - mask_prob.min() < 0.15:
-            calibrated_prob = pix_diff_norm
-        else:
-            calibrated_prob = 0.6 * mask_prob + 0.4 * pix_diff_norm
-
-        # Extract change bounding boxes
         bboxes = self.model.extract_bounding_boxes(
-            calibrated_prob,
+            mask_prob,
             threshold=self.config.mask_threshold,
             min_area=35,
             max_boxes=8,
         )
 
-        # Compute change statistics
-        changed_pixel_count = int((calibrated_prob >= self.config.mask_threshold).sum())
-        total_pixels = calibrated_prob.size
-        change_percentage = round((changed_pixel_count / total_pixels) * 100.0, 2)
-
-        # Classify detected environmental change domain from spectral signatures
-        detected_domain = "unchanged"
-        if change_percentage >= 0.8:
-            changed_mask = calibrated_prob >= self.config.mask_threshold
-            t1_ch = t1_norm[changed_mask]
-            t2_ch = t2_norm[changed_mask]
-            # Difference in brightness and color
-            mean_diff = float(np.mean(t2_ch - t1_ch))
-            # Greenness ratio in T1 vs T2
-            g1 = np.mean(t1_ch[:, 1]) if len(t1_ch) > 0 else 0.0
-            g2 = np.mean(t2_ch[:, 1]) if len(t2_ch) > 0 else 0.0
-
-            if g1 > g2 + 0.05:
-                detected_domain = "vegetation_loss"
-            elif mean_diff > 0.08:
-                detected_domain = "urban_expansion"
-            elif np.mean(t2_ch[:, 2]) > np.mean(t2_ch[:, 0]) + 0.05:
-                detected_domain = "water_expansion"
-            else:
-                detected_domain = "land_cover_change"
-
-        # Synthesize domain-aware answer and calibrated confidence for hackathon presentation
-        detailed_answer, primary_answer, calibrated_conf = self._synthesize_detailed_answer(
-            query=query,
-            detected_domain=detected_domain,
-            model_answer=answer_text,
-            change_percentage=change_percentage,
-            bboxes=bboxes,
-        )
+        changed_pixel_count = int((mask_prob >= self.config.mask_threshold).sum())
+        change_percentage = round((changed_pixel_count / mask_prob.size) * 100.0, 2)
 
         return {
-            "answer": detailed_answer,
-            "primary_answer": primary_answer,
-            "confidence": calibrated_conf,
+            "answer": self._describe(answer_text, change_percentage, bboxes),
+            "primary_answer": answer_text,
+            "confidence": round(answer_confidence, 4),
             "change_percentage": change_percentage,
             "changed_pixels": changed_pixel_count,
-            "detected_domain": detected_domain,
+            # Trained on LEVIR-CD, whose masks label building change only.
+            "detected_domain": "building_change" if bboxes else "unchanged",
             "bounding_boxes": bboxes,
-            "mask_prob": calibrated_prob,
+            "mask_prob": mask_prob,
             "execution_time_ms": round(exec_time_ms, 2),
             "original_size": orig_size,
         }
 
-    def _synthesize_detailed_answer(
-        self,
-        query: str,
-        detected_domain: str,
-        model_answer: str,
+    @staticmethod
+    def _sector(normalized_bbox: list[float]) -> str:
+        """Compass sector of a normalised [x1, y1, x2, y2] box's centre."""
+        cx = (normalized_bbox[0] + normalized_bbox[2]) / 2.0
+        cy = (normalized_bbox[1] + normalized_bbox[3]) / 2.0
+        horiz = "west" if cx < 0.35 else ("east" if cx > 0.65 else "central")
+        vert = "north" if cy < 0.35 else ("south" if cy > 0.65 else "central")
+
+        if horiz == "central" and vert == "central":
+            return "the central sector"
+        if horiz == "central":
+            return f"the {vert} sector"
+        if vert == "central":
+            return f"the {horiz} sector"
+        return f"the {vert}-{horiz} quadrant"
+
+    @classmethod
+    def _describe(
+        cls,
+        answer: str,
         change_percentage: float,
         bboxes: list[dict[str, Any]],
-    ) -> tuple[str, str, float]:
-        """Compose an informative, evidence-grounded answer with calibrated confidence."""
-        q_lower = query.lower()
-
-        # Determine spatial location descriptors
-        loc_desc = []
-        for b in bboxes[:3]:
-            norm_box = b["normalized_bbox"]  # [x1, y1, x2, y2]
-            cx = (norm_box[0] + norm_box[2]) / 2.0
-            cy = (norm_box[1] + norm_box[3]) / 2.0
-
-            horiz = "west" if cx < 0.35 else ("east" if cx > 0.65 else "central")
-            vert = "north" if cy < 0.35 else ("south" if cy > 0.65 else "central")
-
-            if horiz == "central" and vert == "central":
-                sector = "the central sector"
-            elif horiz == "central":
-                sector = f"the {vert} sector"
-            elif vert == "central":
-                sector = f"the {horiz} sector"
-            else:
-                sector = f"the {vert}-{horiz} quadrant"
-            loc_desc.append(sector)
-
-        loc_summary = ", ".join(list(dict.fromkeys(loc_desc))) if loc_desc else "across the scene"
-
-        # 1. No significant change scenario
-        if change_percentage < 0.8:
-            if "has" in q_lower or "increased" in q_lower or "decreased" in q_lower:
-                primary = "unchanged"
-            elif "did" in q_lower or "is there" in q_lower or "are there" in q_lower:
-                primary = "no"
-            else:
-                primary = "no significant change"
-
-            ans = (
-                f"No significant change detected between the two acquisition dates. "
-                f"Less than 0.8% of the surface exhibited spectral variation, and land-cover "
-                f"features remain stable and unchanged between T1 and T2."
+    ) -> str:
+        """Phrase the network's answer with the change its mask localised."""
+        sentence = f"{answer[:1].upper()}{answer[1:]}."
+        if bboxes:
+            sectors = ", ".join(dict.fromkeys(cls._sector(b["normalized_bbox"]) for b in bboxes[:3]))
+            return (
+                f"{sentence} The change mask marks {change_percentage}% of the scene as changed, "
+                f"in {len(bboxes)} region(s), mainly {sectors}."
             )
-            return ans, primary, 0.948
-
-        # 2. Change detected scenarios
-        # Question about built-up / structures / construction
-        if "built-up" in q_lower or "building" in q_lower or "structure" in q_lower or "construction" in q_lower:
-            if detected_domain == "urban_expansion" or detected_domain == "land_cover_change":
-                if "increased" in q_lower or "decreased" in q_lower or "unchanged" in q_lower:
-                    primary = "increased"
-                elif "did" in q_lower or "are" in q_lower or "is" in q_lower:
-                    primary = "yes"
-                else:
-                    primary = "new built-up area constructed"
-
-                ans = (
-                    f"The built-up area has increased significantly. Newly constructed structures and infrastructure "
-                    f"are identified in {loc_summary}, affecting approximately {change_percentage}% of the analyzed region "
-                    f"({len(bboxes)} distinct change clusters confirmed)."
-                )
-                conf = round(0.912 + min(0.05, len(bboxes) * 0.01), 3)
-                return ans, primary, conf
-            else:
-                primary = "unchanged"
-                ans = (
-                    f"The built-up area remains unchanged. The detected land-cover alteration ({change_percentage}%) "
-                    f"corresponds to environmental variations ({detected_domain.replace('_', ' ')}) rather than new construction."
-                )
-                return ans, primary, 0.895
-
-        # Question about vegetation / forest / deforestation
-        elif "vegetation" in q_lower or "forest" in q_lower or "tree" in q_lower or "deforestation" in q_lower:
-            if detected_domain == "vegetation_loss":
-                primary = "decreased" if "decreased" in q_lower else "vegetation cleared / deforestation"
-                ans = (
-                    f"Vegetation cover has decreased. Active clearing and tree canopy loss are observed over {change_percentage}% "
-                    f"of the analyzed terrain, primarily situated in {loc_summary} ({len(bboxes)} clearing zones)."
-                )
-                conf = 0.924
-            else:
-                primary = "unchanged"
-                ans = (
-                    f"Vegetation cover remains largely stable. Detected variations ({change_percentage}%) represent "
-                    f"surface alterations in {loc_summary}."
-                )
-                conf = 0.887
-            return ans, primary, conf
-
-        # Question about water / flooding / river
-        elif "water" in q_lower or "flood" in q_lower or "river" in q_lower or "lake" in q_lower:
-            if detected_domain == "water_expansion":
-                primary = "water body expanded / flooded" if "expanded" in q_lower else "yes"
-                ans = (
-                    f"Water accumulation and flooding are detected. The water body has expanded by {change_percentage}%, "
-                    f"with surface water extending into {loc_summary}."
-                )
-                conf = 0.931
-            else:
-                primary = "no" if ("is there" in q_lower or "did" in q_lower) else "unchanged"
-                ans = (
-                    f"No significant flooding or water expansion detected. The identified change ({change_percentage}%) "
-                    f"corresponds to other surface alterations."
-                )
-                conf = 0.902
-            return ans, primary, conf
-
-        # General "What changed?" questions
-        else:
-            domain_label = {
-                "urban_expansion": "new built-up area constructed",
-                "vegetation_loss": "vegetation cleared / deforestation",
-                "water_expansion": "water body expanded / flooded",
-                "land_cover_change": "land-cover transformation",
-            }.get(detected_domain, "land-cover change")
-
-            ans = (
-                f"Bi-temporal change analysis detected: {domain_label.capitalize()}. "
-                f"Surface transformation occurred across {change_percentage}% of the scene, with {len(bboxes)} primary "
-                f"change clusters localized in {loc_summary}."
+        if change_percentage > 0:
+            return (
+                f"{sentence} The change mask marks {change_percentage}% of the scene as changed, "
+                "with no region large enough to localise."
             )
-            return ans, domain_label, 0.915
+        return f"{sentence} The change mask marks no changed region."
 
     def predict(self, request: ModelRequest) -> ModelResponse:
         """Process a request and return a standardized ModelResponse (SpecialistModel protocol).
