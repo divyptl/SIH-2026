@@ -61,10 +61,10 @@ class PairedTransform:
 
         # --- Geometric augmentations (same for both) ---
 
-        # Random resize crop
-        h, w = sar.shape[-2:]
-        crop_size = min(h, w)
-        i, j, ch, cw = T.RandomCrop.get_params(sar, (crop_size, crop_size))
+        # True Random Resized Crop (crucial for breaking overfitting)
+        i, j, ch, cw = T.RandomResizedCrop.get_params(
+            sar, scale=(0.5, 1.0), ratio=(0.75, 1.33)
+        )
         sar = TF.crop(sar, i, j, ch, cw)
         optical = TF.crop(optical, i, j, ch, cw)
 
