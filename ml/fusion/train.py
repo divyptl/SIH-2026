@@ -43,7 +43,7 @@ from ml.fusion.transforms import PairedTransform, normalize_optical, normalize_s
 
 # ── Terrain label mapping ───────────────────────────────────────────────
 
-TERRAIN_TO_IDX = {"agri": 0, "barrenland": 1, "grassland": 2, "urban": 3}
+TERRAIN_TO_IDX = {"agri": 0, "barrenland": 1, "grassland": 2, "urban": 3, "water": 4}
 
 
 def collate_with_terrain(batch):
@@ -479,7 +479,7 @@ def main() -> None:
             feat_dim = 768
         else:
             feat_dim = 512 if model_cfg.backbone in ("resnet18", "resnet34") else 2048
-        terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=4).to(device)
+        terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=5).to(device)
 
     total_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"  Model params: {total_params:.1f}M")

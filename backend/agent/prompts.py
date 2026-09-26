@@ -147,9 +147,28 @@ def analysis_system_prompt(task: Task) -> str:
     return f"{_TASK_INSTRUCTIONS[task]}\n\n{_SHARED_RULES}\n\n{ANALYSIS_RESPONSE_SHAPE}"
 
 
-def build_user_message(*, query: str, image_summaries: list[str], task: Task) -> str:
-    """The text half of the user turn: query plus resolved input context."""
+def build_user_message(
+    *,
+    query: str,
+    image_summaries: list[str],
+    task: Task,
+    specialist_context: str | None = None,
+) -> str:
+    """The text half of the user turn: query plus resolved input context.
+
+    When ``specialist_context`` is provided (hybrid execution), a fine-tuned
+    model's analysis is included so the VLM can reference domain-adapted
+    evidence alongside the images.
+    """
     lines = [f"Task: {task}", "", "Input images:"]
     lines.extend(f"  [{i}] {summary}" for i, summary in enumerate(image_summaries))
+    if specialist_context:
+        lines.extend([
+            "",
+            "Domain-adapted specialist analysis (from a fine-tuned model — use this "
+            "as additional evidence when answering, but always verify against the "
+            "actual images):",
+            f"  {specialist_context}",
+        ])
     lines.extend(["", f"User query: {query}"])
     return "\n".join(lines)

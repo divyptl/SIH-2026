@@ -37,7 +37,12 @@ except ImportError:
     Image = None
 
 from ml.fusion.model import ContrastiveLoss, DualEncoder, TerrainClassifier
-from ml.fusion.transforms import normalize_optical, normalize_sar
+from ml.fusion.transforms import (
+    compute_ndwi,
+    compute_sar_water_mask,
+    normalize_optical,
+    normalize_sar,
+)
 
 # Default image size (should match training config)
 DEFAULT_IMAGE_SIZE = 224
@@ -53,7 +58,7 @@ class FusionModel:
         image_size: Expected input image size.
     """
 
-    TERRAIN_CLASSES = ["agri", "barrenland", "grassland", "urban"]
+    TERRAIN_CLASSES = ["agri", "barrenland", "grassland", "urban", "water"]
 
     def __init__(
         self,
@@ -112,7 +117,7 @@ class FusionModel:
                 feat_dim = 512
             else:
                 feat_dim = 2048
-            terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=4)
+            terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=5)
             terrain_head.load_state_dict(ckpt["terrain_head"])
 
         print(f"Loaded fusion model from {checkpoint_path}")
@@ -320,7 +325,8 @@ class FusionModel:
     ) -> dict:
         """Full analysis of a SAR-optical pair.
 
-        Returns a dict with similarity, embeddings, and terrain classification.
+        Returns a dict with similarity, embeddings, terrain classification,
+        and water detection (NDWI + SAR water mask).
         This is the main method to call from the backend/controller.
         """
         result = {
@@ -336,6 +342,40 @@ class FusionModel:
                 "confidence": confidence,
                 "probabilities": all_probs,
             }
+
+        # Water detection via spectral indices
+        opt_tensor = self._prepare_tensor(optical_image, "optical")
+        sar_tensor = self._prepare_tensor(sar_image, "sar")
+
+        # NDWI from optical (un-normalised values needed, so use raw [0,1] tensor)
+        import torchvision.transforms.functional as TF
+        if isinstance(optical_image, (str, Path)):
+            raw_opt = np.array(Image.open(optical_image).convert("RGB"), dtype=np.float32) / 255.0
+            raw_opt = torch.from_numpy(raw_opt.transpose(2, 0, 1))
+            raw_opt = TF.resize(raw_opt, [self.image_size, self.image_size], antialias=True)
+        else:
+            raw_opt = opt_tensor.squeeze(0)  # already a tensor
+
+        ndwi_map = compute_ndwi(raw_opt)  # (1, H, W)
+        ndwi_mean = ndwi_map.mean().item()
+        water_pixel_ratio = (ndwi_map > 0.0).float().mean().item()
+
+        # SAR water mask
+        if isinstance(sar_image, (str, Path)):
+            raw_sar = np.array(Image.open(sar_image).convert("L"), dtype=np.float32) / 255.0
+            raw_sar = torch.from_numpy(raw_sar[np.newaxis])
+            raw_sar = TF.resize(raw_sar, [self.image_size, self.image_size], antialias=True)
+        else:
+            raw_sar = sar_tensor.squeeze(0)
+
+        sar_water = compute_sar_water_mask(raw_sar)
+        sar_water_ratio = sar_water.mean().item()
+
+        result["water"] = {
+            "ndwi_mean": round(ndwi_mean, 4),
+            "ndwi_water_pixel_ratio": round(water_pixel_ratio, 4),
+            "sar_water_pixel_ratio": round(sar_water_ratio, 4),
+        }
 
         return result
 

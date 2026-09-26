@@ -132,3 +132,66 @@ def normalize_optical(x: torch.Tensor) -> torch.Tensor:
     mean = torch.tensor(OPTICAL_MEAN, device=x.device).view(-1, 1, 1)
     std = torch.tensor(OPTICAL_STD, device=x.device).view(-1, 1, 1)
     return (x - mean) / std
+
+
+# ── Spectral Indices ─────────────────────────────────────────────────────
+
+
+def compute_ndwi(optical: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Compute Normalized Difference Water Index from an RGB optical image.
+
+    True NDWI (McFeeters 1996) = (Green - NIR) / (Green + NIR), but
+    Sentinel-2 true-colour composites contain only visible RGB bands.
+
+    We approximate NIR as the inverse of visible brightness:
+        pseudo_NIR = 1 - (R + G + B) / 3
+    This is effective because water absorbs strongly in NIR and appears
+    dark overall, while vegetation is bright in NIR and thus has a low
+    pseudo_NIR value.
+
+    Args:
+        optical: (C, H, W) or (B, C, H, W) tensor with C >= 3, values in [0, 1].
+        eps: Small constant to avoid division by zero.
+
+    Returns:
+        NDWI map of shape (1, H, W) or (B, 1, H, W), values in [-1, 1].
+        High positive values indicate water.
+    """
+    squeeze = False
+    if optical.dim() == 3:
+        optical = optical.unsqueeze(0)
+        squeeze = True
+
+    red = optical[:, 0:1]
+    green = optical[:, 1:2]
+    blue = optical[:, 2:3]
+
+    # Pseudo-NIR: high when scene is dark overall (water), low when bright (veg)
+    pseudo_nir = 1.0 - (red + green + blue) / 3.0
+
+    ndwi = (green - pseudo_nir) / (green + pseudo_nir + eps)
+
+    if squeeze:
+        ndwi = ndwi.squeeze(0)
+    return ndwi
+
+
+def compute_sar_water_mask(
+    sar: torch.Tensor,
+    threshold: float = 0.15,
+) -> torch.Tensor:
+    """Estimate a binary water mask from SAR backscatter.
+
+    Smooth open water produces specular reflection away from the sensor,
+    resulting in very low backscatter (dark pixels) in SAR imagery.
+
+    Args:
+        sar: (1, H, W) or (B, 1, H, W) SAR tensor, values in [0, 1].
+        threshold: Backscatter values below this are classified as water.
+                   The default (0.15) works well for normalised Sentinel-1.
+
+    Returns:
+        Binary mask of same shape: 1.0 = likely water, 0.0 = non-water.
+    """
+    return (sar < threshold).float()
+

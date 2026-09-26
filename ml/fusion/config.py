@@ -42,7 +42,7 @@ class TrainConfig:
     dataset: str = "both"               # sen12 | qxs | both
     data_root: str = "data/sen12/raw"
     qxs_root: str = "data/QXSLAB_SAROPT/QXSLAB_SAROPT"
-    terrains: list[str] = field(default_factory=lambda: ["agri", "barrenland", "grassland", "urban"])
+    terrains: list[str] = field(default_factory=lambda: ["agri", "barrenland", "grassland", "urban", "water"])
     num_workers: int = 16
     pin_memory: bool = True
 

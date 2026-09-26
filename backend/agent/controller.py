@@ -277,6 +277,7 @@ class AgenticController:
         # --- 4. Execute -------------------------------------------------------
         step_timer = _Timer()
         payload: dict[str, Any] | None = None
+        specialist_payload: dict[str, Any] | None = None
         usage: dict[str, Any] = {}
         params: dict[str, Any]
         if domain_adapted and entry.runner is not None:
@@ -293,11 +294,36 @@ class AgenticController:
                 )
                 tool_name, backend, model_name, domain_adapted = self._baseline(entry)
 
+            # Hybrid execution: the specialist returned evidence but no answer.
+            # Save the specialist payload and fall through to the VLM baseline
+            # which will receive the specialist's context in its prompt.
+            if payload is not None and not payload.get("answer"):
+                specialist_payload = payload
+                payload = None  # trigger VLM baseline below
+
         if payload is None:
             params = {"temperature": 0.2, "max_tokens": 1400}
-            payload, usage = await self._execute_baseline(
-                task=task, query=query, images=images, params=params
+            specialist_context = (
+                specialist_payload.get("specialist_context")
+                if specialist_payload
+                else None
             )
+            payload, usage = await self._execute_baseline(
+                task=task,
+                query=query,
+                images=images,
+                params=params,
+                specialist_context=specialist_context,
+            )
+            # Merge specialist evidence (terrain probs, similarity) ahead of
+            # any evidence the VLM itself produced, so the user sees both.
+            if specialist_payload is not None:
+                sp_evidence = specialist_payload.get("evidence", [])
+                payload["evidence"] = sp_evidence + (payload.get("evidence") or [])
+                # Prefer the specialist's confidence when the VLM omits one.
+                if payload.get("confidence") is None and specialist_payload.get("confidence") is not None:
+                    payload["confidence"] = specialist_payload["confidence"]
+
         steps.append(
             TraceStep(
                 stage="execute",
@@ -443,12 +469,19 @@ class AgenticController:
         query: str,
         images: list[PreparedImage],
         params: dict[str, Any],
+        specialist_context: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run the task on the generic OpenRouter vision-language model."""
+        """Run the task on the generic OpenRouter vision-language model.
+
+        When ``specialist_context`` is provided (hybrid execution), the domain-
+        adapted evidence is prepended to the user message so the VLM can
+        incorporate it when answering.
+        """
         user_text = build_user_message(
             query=query,
             image_summaries=[_image_summary(image) for image in images],
             task=task,
+            specialist_context=specialist_context,
         )
         text, usage = await self._client.complete(
             model=self._settings.vision_model,

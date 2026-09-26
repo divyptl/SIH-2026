@@ -37,6 +37,7 @@ TERRAIN_NAMES = {
     "barrenland": "barren land",
     "grassland": "grassland",
     "urban": "urban area",
+    "water": "water body",
 }
 
 
@@ -212,7 +213,14 @@ def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
 
 
 def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
-    """Classify terrain from a co-registered optical + SAR pair with the dual encoder."""
+    """Run the dual encoder on a co-registered optical + SAR pair.
+
+    Returns specialist evidence (terrain classification, cross-modal similarity,
+    NDWI water index, SAR water mask) **without** a canned answer.  The
+    controller detects the missing answer and calls the VLM baseline with the
+    specialist context injected so the language model can answer the user's
+    actual question informed by domain-adapted data.
+    """
     by_modality = {image.info.modality: image for image in images}
     sar = _pil(by_modality["sar"])
     optical = _pil(by_modality["optical"])
@@ -222,28 +230,60 @@ def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
     similarity = specialist.compare(sar, optical)
     terrain, confidence, probabilities = specialist.classify_terrain(sar, optical)
 
+    # Full analysis includes NDWI and SAR water mask
+    analysis = specialist.get_analysis(sar, optical)
+    water_info = analysis.get("water", {})
+    ndwi_water_pct = water_info.get("ndwi_water_pixel_ratio", 0.0)
+    sar_water_pct = water_info.get("sar_water_pixel_ratio", 0.0)
+    ndwi_mean = water_info.get("ndwi_mean", 0.0)
+
     ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
+    terrain_summary = ", ".join(
+        f"{TERRAIN_NAMES.get(name, name)} {p:.0%}" for name, p in ranked
+    )
+
     evidence = [
         {
             "description": (
-                "Terrain probabilities from the fused optical and SAR features: "
-                + ", ".join(f"{TERRAIN_NAMES.get(name, name)} {p:.0%}" for name, p in ranked)
-                + "."
+                f"Terrain probabilities from the fused optical and SAR features: "
+                f"{terrain_summary}."
             ),
             "image_index": sar_index,
         },
         {
             "description": (
-                f"Optical–SAR embedding similarity is {similarity:.2f} "
+                f"Optical\u2013SAR embedding similarity is {similarity:.2f} "
                 "(1 means the two views agree strongly; low values suggest a "
                 "misaligned or mismatched pair)."
             ),
             "image_index": sar_index,
         },
+        {
+            "description": (
+                f"NDWI (Normalized Difference Water Index) analysis: "
+                f"mean NDWI = {ndwi_mean:.3f}, "
+                f"{ndwi_water_pct:.0%} of optical pixels indicate water "
+                f"(NDWI > 0). SAR low-backscatter water mask: "
+                f"{sar_water_pct:.0%} of SAR pixels indicate smooth water."
+            ),
+            "image_index": sar_index,
+        },
     ]
-    answer = (
-        f"The optical and SAR pair shows {TERRAIN_NAMES.get(terrain, terrain)}. "
-        "This specialist classifies terrain type; it does not answer other questions "
-        "about the scene."
+
+    # Structured context the VLM will receive in its prompt.
+    specialist_context = (
+        f"A fine-tuned optical-SAR dual encoder (terrain classifier) reports: "
+        f"{terrain_summary}. "
+        f"Top prediction: {TERRAIN_NAMES.get(terrain, terrain)} ({confidence:.0%}). "
+        f"Optical\u2013SAR embedding cosine similarity: {similarity:.2f}. "
+        f"NDWI water analysis: mean NDWI = {ndwi_mean:.3f}, "
+        f"{ndwi_water_pct:.0%} of optical pixels indicate water (NDWI > 0). "
+        f"SAR low-backscatter water mask: {sar_water_pct:.0%} of pixels are smooth water."
     )
-    return {"answer": answer, "confidence": confidence, "evidence": evidence}
+
+    return {
+        "answer": None,  # signals the controller to augment with VLM
+        "confidence": confidence,
+        "evidence": evidence,
+        "specialist_context": specialist_context,
+    }

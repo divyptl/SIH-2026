@@ -450,16 +450,16 @@ class TerrainClassifier(nn.Module):
 
     Args:
         feature_dim: Backbone feature dimensionality (per modality).
-        num_classes: Number of terrain classes (default 4: agri/barren/grass/urban).
+        num_classes: Number of terrain classes (default 5: agri/barren/grass/urban/water).
         hidden_dim: Hidden layer size.
     """
 
-    TERRAIN_CLASSES = ["agri", "barrenland", "grassland", "urban"]
+    TERRAIN_CLASSES = ["agri", "barrenland", "grassland", "urban", "water"]
 
     def __init__(
         self,
         feature_dim: int = 512,
-        num_classes: int = 4,
+        num_classes: int = 5,
         hidden_dim: int = 256,
     ) -> None:
         super().__init__()
@@ -492,7 +492,7 @@ if __name__ == "__main__":
         attn_layers=2,
     )
     loss_fn = ContrastiveLoss(temperature=0.07, learn_temperature=False)
-    terrain_head = TerrainClassifier(feature_dim=2048, num_classes=4)
+    terrain_head = TerrainClassifier(feature_dim=2048, num_classes=5)
 
     # Fake batch
     batch_size = 4

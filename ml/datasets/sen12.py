@@ -39,7 +39,7 @@ except ImportError:
     Image = None  # type: ignore[misc, assignment]
 
 
-ALL_TERRAINS = ["agri", "barrenland", "grassland", "urban"]
+ALL_TERRAINS = ["agri", "barrenland", "grassland", "urban", "water"]
 
 
 class SEN12Dataset(Dataset):
