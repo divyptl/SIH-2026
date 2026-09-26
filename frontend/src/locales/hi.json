@@ -8,7 +8,8 @@
     "searchLanguage": "भाषा खोजें",
     "noLanguage": "कोई भाषा नहीं मिली",
     "suggested": "सुझाई गई",
-    "allLanguages": "सभी भाषाएँ"
+    "allLanguages": "सभी भाषाएँ",
+    "demo": "यह कैसे काम करता है?"
   },
   "home": {
     "title": "एक उपग्रह छवि से एक सवाल पूछें।",

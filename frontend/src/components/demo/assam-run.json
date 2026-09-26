@@ -1,0 +1,294 @@
+{
+  "query": "इन दो तस्वीरों में क्या बदला है?",
+  "request_id": "94734c967950",
+  "task": "change_vqa",
+  "answer": "Bare ground to water. The change mask marks 69.91% of the scene as changed, in 29 regions; the 8 largest are marked. By region, the model describes the change mainly as bare ground to water (59% of the scene); the largest region is in the south sector.",
+  "confidence": 0.654,
+  "evidence": [
+    {
+      "type": "mask",
+      "data": {
+        "png": "/demo/assam-mask.png"
+      },
+      "description": "69.9% of the scene (about 165 km²) is predicted as changed, in 29 regions.",
+      "label": "change mask",
+      "confidence": null,
+      "image_index": 1
+    },
+    {
+      "type": "bbox",
+      "data": {
+        "x_min": 0.0,
+        "y_min": 0.4273,
+        "x_max": 1.0,
+        "y_max": 1.0
+      },
+      "description": "Bare ground to water: 33.5% of the scene (about 79 km²), in the south sector.",
+      "label": "bare ground to water",
+      "confidence": 0.5915,
+      "image_index": 1
+    },
+    {
+      "type": "bbox",
+      "data": {
+        "x_min": 0.282,
+        "y_min": 0.1148,
+        "x_max": 1.0,
+        "y_max": 0.5188
+      },
+      "description": "Bare ground to water: 8.2% of the scene (about 19 km²), in the north sector.",
+      "label": "bare ground to water",
+      "confidence": 0.7125,
+      "image_index": 1
+    },
+    {
+      "type": "bbox",
+      "data": {
+        "x_min": 0.0,
+        "y_min": 0.0,
+        "x_max": 0.4781,
+        "y_max": 0.2289
+      },
+      "description": "Bare ground to water: 6.6% of the scene (about 16 km²), in the north-west quadrant.",
+      "label": "bare ground to water",
+      "confidence": 0.9505,
+      "image_index": 1
+    },
+    {
+      "type": "bbox",
+      "data": {
+        "x_min": 0.0,
+        "y_min": 0.3031,
+        "x_max": 0.3117,
+        "y_max": 0.6578
+      },
+      "description": "Bare ground to water: 5.6% of the scene (about 13 km²), in the west sector.",
+      "label": "bare ground to water",
+      "confidence": 0.9405,
+      "image_index": 1
+    },
+    {
+      "type": "bbox",
+      "data": {
+        "x_min": 0.7344,
+        "y_min": 0.3422,
+        "x_max": 1.0,
+        "y_max": 0.4852
+      },
+      "description": "Bare ground to water: 1.9% of the scene (about 4.5 km²), in the east sector.",
+      "label": "bare ground to water",
+      "confidence": 0.8771,
+      "image_index": 1
+    },
+    {
+      "type": "bbox",
+      "data": {
+        "x_min": 0.5062,
+        "y_min": 0.0,
+        "x_max": 0.7953,
+        "y_max": 0.1125
+      },
+      "description": "Bare ground to water: 1.3% of the scene (about 3.1 km²), in the north-east quadrant.",
+      "label": "bare ground to water",
+      "confidence": 0.9605,
+      "image_index": 1
+    },
+    {
+      "type": "bbox",
+      "data": {
+        "x_min": 0.8758,
+        "y_min": 0.0742,
+        "x_max": 1.0,
+        "y_max": 0.1984
+      },
+      "description": "Bare ground to water: 1.0% of the scene (about 2.3 km²), in the north-east quadrant.",
+      "label": "bare ground to water",
+      "confidence": 0.9546,
+      "image_index": 1
+    },
+    {
+      "type": "bbox",
+      "data": {
+        "x_min": 0.2461,
+        "y_min": 0.1969,
+        "x_max": 0.3648,
+        "y_max": 0.2898
+      },
+      "description": "Bare ground to water: 0.7% of the scene (about 1.6 km²), in the north-west quadrant.",
+      "label": "bare ground to water",
+      "confidence": 0.9546,
+      "image_index": 1
+    }
+  ],
+  "model_name": "ml.C_VQA (checkpoints/change_detection_v2/best.pt)",
+  "execution_time_ms": 1594.6745999709144,
+  "inputs": [
+    {
+      "index": 0,
+      "filename": "assam-brahmaputra_2024-01-28_dry-season_s2-truecolour.tif",
+      "content_type": "image/tiff",
+      "detected_format": "TIFF",
+      "modality": "optical",
+      "width": 1536,
+      "height": 1536,
+      "size_bytes": 4679444,
+      "is_georeferenced": true,
+      "ground_sample_distance_m": 10.0,
+      "notes": [
+        "GeoTIFF: georeferencing tags present.",
+        "Downscaled to 1280x1280 before upstream inference."
+      ],
+      "preview_data_uri": null
+    },
+    {
+      "index": 1,
+      "filename": "assam-brahmaputra_2024-07-26_monsoon-flood_s2-truecolour.tif",
+      "content_type": "image/tiff",
+      "detected_format": "TIFF",
+      "modality": "optical",
+      "width": 1536,
+      "height": 1536,
+      "size_bytes": 4402452,
+      "is_georeferenced": true,
+      "ground_sample_distance_m": 10.0,
+      "notes": [
+        "GeoTIFF: georeferencing tags present.",
+        "Downscaled to 1280x1280 before upstream inference."
+      ],
+      "preview_data_uri": null
+    }
+  ],
+  "trace": {
+    "input_configuration": "bi_temporal_pair",
+    "task": "change_vqa",
+    "task_source": "auto",
+    "routing_rationale": "Rule-based: a bi temporal pair input maps to 'change_vqa'.",
+    "selected_tools": ["rs-change-vqa"],
+    "steps": [
+      {
+        "stage": "translate",
+        "tool": "query-translator",
+        "model": "IndicTrans2",
+        "params": {
+          "source": "hin_Deva",
+          "target": "eng_Latn",
+          "detected": false
+        },
+        "detail": "Hindi → English: What has changed in these two pictures?",
+        "duration_ms": 220.91210004873574
+      },
+      {
+        "stage": "validate",
+        "tool": "input-validator",
+        "model": null,
+        "params": {
+          "image_count": 2,
+          "modalities": ["optical", "optical"],
+          "formats": ["TIFF", "TIFF"]
+        },
+        "detail": "Resolved input configuration: bi_temporal_pair.",
+        "duration_ms": 0.01
+      },
+      {
+        "stage": "classify",
+        "tool": "query-router",
+        "model": null,
+        "params": {
+          "input_configuration": "bi_temporal_pair"
+        },
+        "detail": "Task 'change_vqa' (auto). Rule-based: a bi temporal pair input maps to 'change_vqa'.",
+        "duration_ms": 0.01
+      },
+      {
+        "stage": "select",
+        "tool": "tool-selector",
+        "model": "ml.C_VQA (checkpoints/change_detection_v2/best.pt)",
+        "params": {
+          "backend": "local_specialist",
+          "permitted_params": ["temperature", "max_tokens"]
+        },
+        "detail": "Selected 'rs-change-vqa' for task 'change_vqa'.",
+        "duration_ms": 0.23
+      },
+      {
+        "stage": "execute",
+        "tool": "rs-change-vqa",
+        "model": "ml.C_VQA (checkpoints/change_detection_v2/best.pt)",
+        "params": {
+          "backend": "local_specialist",
+          "checkpoint": "checkpoints/change_detection_v2/best.pt"
+        },
+        "detail": "Ran change_vqa over 2 image(s).",
+        "duration_ms": 527.37
+      },
+      {
+        "stage": "aggregate",
+        "tool": "response-aggregator",
+        "model": null,
+        "params": {
+          "evidence_items": 9,
+          "bounding_boxes": 8
+        },
+        "detail": "Combined answer with 8 spatial evidence region(s).",
+        "duration_ms": 0.07
+      },
+      {
+        "stage": "translate",
+        "tool": "answer-translator",
+        "model": "IndicTrans2",
+        "params": {
+          "source": "eng_Latn",
+          "target": "hin_Deva"
+        },
+        "detail": "English → Hindi (16 texts)",
+        "duration_ms": 846.0024999221787
+      }
+    ],
+    "total_duration_ms": 1594.6745999709144,
+    "domain_adapted": true,
+    "warnings": [
+      "Both images were detected as optical; treating this as a bi-temporal pair rather than a cross-modal pair.",
+      "GeoTIFF: georeferencing tags present.",
+      "Downscaled to 1280x1280 before upstream inference."
+    ]
+  },
+  "usage": null,
+  "translation": {
+    "engine": "IndicTrans2",
+    "source_language": "hi",
+    "source_detected": false,
+    "target_language": "hi",
+    "original_query": "इन दो तस्वीरों में क्या बदला है?",
+    "english_query": "What has changed in these two pictures?",
+    "answer": "पानी के लिए खाली जमीन। परिवर्तन मास्क 29 क्षेत्रों में परिवर्तित दृश्य के 69.91% को चिह्नित करता है; 8 सबसे बड़े को चिह्नित किया गया है। क्षेत्र के अनुसार, मॉडल परिवर्तन को मुख्य रूप से खाली जमीन से पानी (दृश्य का 59 प्रतिशत) के रूप में वर्णित करता है; सबसे बड़ा क्षेत्र दक्षिण क्षेत्र में है।",
+    "evidence_descriptions": [
+      "29 क्षेत्रों में दृश्य (लगभग 165 वर्ग कि. मी.) के बदले हुए होने की भविष्यवाणी की गई है।",
+      "खाली जमीन से पानीः दक्षिण क्षेत्र में दृश्य का 33.5% (लगभग 79 वर्ग कि. मी.)।",
+      "खाली जमीन से पानीः उत्तरी क्षेत्र में दृश्य का 8.2% (लगभग 19 वर्ग कि. मी.)।",
+      "खाली जमीन से पानीः उत्तर-पश्चिम चतुर्थांश में दृश्य का 6.6% (लगभग 16 वर्ग कि. मी.)।",
+      "खाली जमीन से पानीः पश्चिमी क्षेत्र में दृश्य का 5.6% (लगभग 13 वर्ग कि. मी.)।",
+      "खाली जमीन से पानीः पूर्वी क्षेत्र में दृश्य का 1.9% (लगभग 4.5 वर्ग कि. मी.)।",
+      "खाली जमीन से पानीः उत्तर-पूर्व चतुर्थांश में दृश्य का 1.3% (लगभग 3.1 वर्ग कि. मी.)।",
+      "खाली जमीन से पानीः उत्तर-पूर्व चतुर्थांश में दृश्य का 1% (लगभग 2.3 वर्ग कि. मी.)।",
+      "खाली जमीन से पानीः उत्तर-पश्चिम चतुर्थांश में दृश्य का 0.7% (लगभग 1.62 कि. मी.)।"
+    ],
+    "evidence_labels": [
+      "मास्क बदलें",
+      "पानी के लिए खाली जमीन",
+      "पानी के लिए खाली जमीन",
+      "पानी के लिए खाली जमीन",
+      "पानी के लिए खाली जमीन",
+      "पानी के लिए खाली जमीन",
+      "पानी के लिए खाली जमीन",
+      "पानी के लिए खाली जमीन",
+      "पानी के लिए खाली जमीन"
+    ],
+    "warnings": [
+      "दोनों छवियों को ऑप्टिकल के रूप में पाया गया था; इसे एक क्रॉस-मॉडल जोड़ी के बजाय एक द्वि-अस्थायी जोड़ी के रूप में माना जाता है।",
+      "जियोटीआईएफएफः भू-संदर्भ टैग मौजूद हैं।",
+      "ऊपर की ओर अनुमान लगाने से पहले 1280x1280 तक नीचे चला गया।"
+    ],
+    "routing_rationale": "नियम-आधारितः एक द्वि-लौकिक जोड़ी'चेंज _ वी. के. ए.'के लिए मानचित्रित होती है।"
+  },
+  "narration": null
+}

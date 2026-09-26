@@ -1,0 +1,144 @@
+{
+  "query": "Using the optical and radar images together, what kind of land is this and how much of it is under water?",
+  "request_id": "260ace68ed20",
+  "task": "fusion",
+  "answer": "Based on the fused optical and SAR analysis, this region is classified as agricultural land with 35% confidence.\n\nSupporting analysis:\n- The optical and SAR embeddings have a cosine similarity of 0.53.\n- NDWI analysis shows 95% of the area is water (mean NDWI: 0.940).\n- SAR backscatter mask shows 48% of the area is smooth water.\nTop predicted terrains: agricultural land 35%, grassland 31%, urban area 26%, barren land 8%.",
+  "confidence": 0.350614070892334,
+  "evidence": [
+    {
+      "type": "observation",
+      "data": null,
+      "description": "Terrain probabilities from the fused optical and SAR features: agricultural land 35%, grassland 31%, urban area 26%, barren land 8%.",
+      "label": null,
+      "confidence": null,
+      "image_index": 1
+    },
+    {
+      "type": "observation",
+      "data": null,
+      "description": "Optical–SAR embedding similarity is 0.53 (1 means the two views agree strongly; low values suggest a misaligned or mismatched pair).",
+      "label": null,
+      "confidence": null,
+      "image_index": 1
+    },
+    {
+      "type": "observation",
+      "data": null,
+      "description": "NDWI (Normalized Difference Water Index) analysis: mean NDWI = 0.940, 95% of optical pixels indicate water (NDWI > 0). SAR low-backscatter water mask: 48% of SAR pixels indicate smooth water.",
+      "label": null,
+      "confidence": null,
+      "image_index": 1
+    }
+  ],
+  "model_name": "ml.fusion (checkpoints/fusion_best.pt)",
+  "execution_time_ms": 79.28,
+  "inputs": [
+    {
+      "index": 0,
+      "filename": "india-900498_s2-truecolour.tif",
+      "content_type": "image/tiff",
+      "detected_format": "TIFF",
+      "modality": "optical",
+      "width": 512,
+      "height": 512,
+      "size_bytes": 400400,
+      "is_georeferenced": true,
+      "ground_sample_distance_m": 9.431,
+      "notes": ["GeoTIFF: georeferencing tags present."],
+      "preview_data_uri": null
+    },
+    {
+      "index": 1,
+      "filename": "india-900498_s1-vv-vh-rgb.tif",
+      "content_type": "image/tiff",
+      "detected_format": "TIFF",
+      "modality": "sar",
+      "width": 512,
+      "height": 512,
+      "size_bytes": 646397,
+      "is_georeferenced": true,
+      "ground_sample_distance_m": 9.431,
+      "notes": ["GeoTIFF: georeferencing tags present."],
+      "preview_data_uri": null
+    }
+  ],
+  "trace": {
+    "input_configuration": "cross_modal_pair",
+    "task": "fusion",
+    "task_source": "auto",
+    "routing_rationale": "Rule-based: a cross modal pair input maps to 'fusion'.",
+    "selected_tools": ["rs-optical-sar-fusion"],
+    "steps": [
+      {
+        "stage": "validate",
+        "tool": "input-validator",
+        "model": null,
+        "params": {
+          "image_count": 2,
+          "modalities": ["optical", "sar"],
+          "formats": ["TIFF", "TIFF"]
+        },
+        "detail": "Resolved input configuration: cross_modal_pair.",
+        "duration_ms": 0.01
+      },
+      {
+        "stage": "classify",
+        "tool": "query-router",
+        "model": null,
+        "params": {
+          "input_configuration": "cross_modal_pair"
+        },
+        "detail": "Task 'fusion' (auto). Rule-based: a cross modal pair input maps to 'fusion'.",
+        "duration_ms": 0.01
+      },
+      {
+        "stage": "select",
+        "tool": "tool-selector",
+        "model": "ml.fusion (checkpoints/fusion_best.pt)",
+        "params": {
+          "backend": "local_specialist",
+          "permitted_params": ["temperature", "max_tokens"]
+        },
+        "detail": "Selected 'rs-optical-sar-fusion' for task 'fusion'.",
+        "duration_ms": 0.32
+      },
+      {
+        "stage": "execute",
+        "tool": "rs-optical-sar-fusion",
+        "model": "ml.fusion (checkpoints/fusion_best.pt)",
+        "params": {
+          "backend": "local_specialist",
+          "checkpoint": "checkpoints/fusion_best.pt"
+        },
+        "detail": "Ran fusion over 2 image(s).",
+        "duration_ms": 78.84
+      },
+      {
+        "stage": "aggregate",
+        "tool": "response-aggregator",
+        "model": null,
+        "params": {
+          "evidence_items": 3,
+          "bounding_boxes": 0
+        },
+        "detail": "Combined answer with 0 spatial evidence region(s).",
+        "duration_ms": 0.03
+      }
+    ],
+    "total_duration_ms": 79.28,
+    "domain_adapted": true,
+    "warnings": [
+      "GeoTIFF: georeferencing tags present.",
+      "GeoTIFF: georeferencing tags present."
+    ]
+  },
+  "usage": null,
+  "translation": null,
+  "narration": null,
+  "ground_truth": {
+    "water_share": 0.4731174997709854,
+    "radar_mask_share": 0.48084741709183676,
+    "source": "Sen1Floods11 hand-labelled chip india-900498",
+    "bounds": [93.73525, 26.72236, 93.78124, 26.76836]
+  }
+}

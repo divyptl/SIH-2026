@@ -1,4 +1,4 @@
-import { Outlet, createRootRoute } from '@tanstack/react-router'
+import { Outlet, createRootRoute, useRouterState } from '@tanstack/react-router'
 
 import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import { TanStackDevtools } from '@tanstack/react-devtools'
@@ -14,23 +14,29 @@ export const Route = createRootRoute({
 })
 
 function RootComponent() {
+  // The devtools button would sit on the demo's presenter controls.
+  const onDemo = useRouterState({
+    select: (state) => state.location.pathname === '/demo',
+  })
   return (
     <ThemeProvider defaultTheme="system">
       <MotionConfig reducedMotion="user">
         <Header />
         <Outlet />
       </MotionConfig>
-      <TanStackDevtools
-        config={{
-          position: 'bottom-right',
-        }}
-        plugins={[
-          {
-            name: 'TanStack Router',
-            render: <TanStackRouterDevtoolsPanel />,
-          },
-        ]}
-      />
+      {!onDemo && (
+        <TanStackDevtools
+          config={{
+            position: 'bottom-right',
+          }}
+          plugins={[
+            {
+              name: 'TanStack Router',
+              render: <TanStackRouterDevtoolsPanel />,
+            },
+          ]}
+        />
+      )}
     </ThemeProvider>
   )
 }

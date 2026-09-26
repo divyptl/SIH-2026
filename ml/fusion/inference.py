@@ -117,7 +117,10 @@ class FusionModel:
                 feat_dim = 512
             else:
                 feat_dim = 2048
-            terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=5)
+            # Sized from the checkpoint: heads trained before "water" was added
+            # have 4 classes, and the class list only ever grows at the end.
+            num_classes = ckpt["terrain_head"]["classifier.3.weight"].shape[0]
+            terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=num_classes)
             terrain_head.load_state_dict(ckpt["terrain_head"])
 
         print(f"Loaded fusion model from {checkpoint_path}")
@@ -126,7 +129,10 @@ class FusionModel:
         if "epoch" in ckpt:
             print(f"  Trained for {ckpt['epoch']} epochs")
 
-        return cls(model=model, terrain_head=terrain_head, device=device)
+        instance = cls(model=model, terrain_head=terrain_head, device=device)
+        if terrain_head is not None:
+            instance.TERRAIN_CLASSES = cls.TERRAIN_CLASSES[:num_classes]
+        return instance
 
     # ── Image loading ────────────────────────────────────────────────────
 

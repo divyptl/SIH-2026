@@ -1,3 +1,6 @@
+import { Link } from '@tanstack/react-router'
+import { useTranslation } from 'react-i18next'
+
 import { LanguagePicker } from '#/components/language-picker'
 import { ModeToggle } from '#/components/mode-toggle'
 
@@ -27,6 +30,7 @@ function Mark() {
 }
 
 const Header = () => {
+  const { t } = useTranslation()
   return (
     <header className="sticky top-0 z-30 border-b bg-background/80 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
@@ -39,6 +43,12 @@ const Header = () => {
           SatQuery AI
         </a>
         <div className="flex items-center gap-2">
+          <Link
+            to="/demo"
+            className="hidden rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring sm:block [&.active]:text-foreground"
+          >
+            {t('header.demo')}
+          </Link>
           <LanguagePicker />
           <ModeToggle />
         </div>

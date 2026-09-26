@@ -353,12 +353,12 @@ def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
         },
     ]
 
-    # Format final answer locally
+    # Plain text: the UI and the PDF report show the answer as-is, not as Markdown.
     best_terrain_name = TERRAIN_NAMES.get(terrain, terrain)
     answer = (
-        f"Based on the fused optical and SAR analysis, this region is classified as **{best_terrain_name}** "
+        f"Based on the fused optical and SAR analysis, this region is classified as {best_terrain_name} "
         f"with {confidence:.0%} confidence.\n\n"
-        f"**Supporting Analysis:**\n"
+        f"Supporting analysis:\n"
         f"- The optical and SAR embeddings have a cosine similarity of {similarity:.2f}.\n"
         f"- NDWI analysis shows {ndwi_water_pct:.0%} of the area is water (mean NDWI: {ndwi_mean:.3f}).\n"
         f"- SAR backscatter mask shows {sar_water_pct:.0%} of the area is smooth water.\n"

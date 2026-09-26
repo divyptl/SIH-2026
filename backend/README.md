@@ -42,7 +42,6 @@ All settings are environment variables, read from `backend/.env`.
 |---|---|---|
 | `OPENROUTER_API_KEY` | *(required)* | Key from openrouter.ai. Without it `/api/analyse` returns 503. |
 | `OPENROUTER_VISION_MODEL` | `google/gemma-4-31b-it:free` | Model that reads the imagery. Must accept `image` input. |
-| `OPENROUTER_ROUTER_MODEL` | same as vision model | Model that classifies the query into a task. |
 | `MAX_IMAGE_BYTES` | `20971520` (20 MB) | Per-upload size cap. |
 | `MAX_IMAGE_EDGE_PX` | `1280` | Longest edge before upstream inference. |
 | `OPENROUTER_TIMEOUT_S` | `120` | Upstream request timeout. |
@@ -60,7 +59,7 @@ All settings are environment variables, read from `backend/.env`.
 | `FUSION_CHECKPOINT` | `checkpoints/fusion_best.pt` | Optical–SAR fusion model. |
 | `SPECIALIST_DEVICE` | `auto` | Device for the specialists: `auto`, `cpu`, `cuda:1`, … |
 | `SPECIALIST_PRELOAD` | `false` | Load the specialists at startup instead of on their first request. |
-| `NARRATION_ENABLED` | `true` | Reword Change-VQA results in plain language with the VLM (see [Plain-language narration](#plain-language-narration)). |
+| `NARRATION_ENABLED` | `false` | `true` rewords Change-VQA results in plain language with the VLM (see [Plain-language narration](#plain-language-narration)). |
 | `OPENROUTER_NARRATION_MODEL` | vision model | Model that writes the plain-language text. Must accept images. |
 
 Settings are read once at startup: restart the server after editing `.env`
@@ -188,7 +187,7 @@ main.py                    FastAPI routes, CORS, upload handling
 config.py                  Environment-backed settings
 schemas.py                 Pydantic API models (mirrors ml/controller/schema.py)
 agent/
-  controller.py            Orchestration: validate -> classify -> select -> execute -> aggregate
+  controller.py            Orchestration: validate -> classify (rule-based) -> select -> execute -> aggregate
   registry.py              Task -> tool mapping, specialist vs. baseline
   prompts.py               Task system prompts and the response contract
 services/
@@ -236,7 +235,23 @@ Behaviour worth knowing:
 - **Confidence** is the model's own estimate (softmax probability or
   detection score), reported as-is.
 
+### Routing
+
+The task is chosen by fixed rules in the controller, with no model call:
+
+| Input | Rule | Task |
+|---|---|---|
+| One image | the English query contains *where, locate, find, show, highlight, point out, mark, detect, box, which part, position of* or *location of* (whole words) | `grounding` |
+| One image | anything else | `vqa` |
+| Two dates of one place | — | `change_vqa` |
+| Optical + SAR pair | — | `fusion` |
+
+A client can still name a task explicitly with the `task` form field.
+
 ### Plain-language narration
+
+Off by default (`NARRATION_ENABLED=false`): answers are the specialists' own
+wording. When switched on, it works as follows.
 
 The Change-VQA model's own wording ("bare ground to water", "33.5% of the
 scene, in the south sector") is exact but hard for non-specialists to read. So

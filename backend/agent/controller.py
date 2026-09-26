@@ -16,16 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from typing import Any
 
 from agent.narration import NarrationRejected, narrate
-from agent.prompts import (
-    ROUTER_SYSTEM_PROMPT,
-    analysis_system_prompt,
-    build_user_message,
-)
 from agent.registry import (
     DEFAULT_PAIR_TASK,
     DEFAULT_SINGLE_TASK,
@@ -44,11 +40,7 @@ from schemas import (
     Usage,
 )
 from services.images import PreparedImage, check_pair_compatibility
-from services.openrouter_client import (
-    OpenRouterClient,
-    OpenRouterError,
-    parse_json_object,
-)
+from services.openrouter_client import OpenRouterClient, OpenRouterError
 
 logger = logging.getLogger("satquery.controller")
 
@@ -57,6 +49,14 @@ logger = logging.getLogger("satquery.controller")
 GSD_TOLERANCE = 2.0
 
 VALID_TASKS: set[str] = set(TOOL_REGISTRY)
+
+# A question about one image that asks to locate something goes to grounding.
+# Matched on the English query (after translation), as whole words.
+_GROUNDING_WORDS = re.compile(
+    r"\b(where|locate|locating|find|show|highlight|point out|mark|detect|"
+    r"box|which part|position of|location of)\b",
+    re.IGNORECASE,
+)
 
 
 class ControllerError(RuntimeError):
@@ -93,19 +93,6 @@ def _fallback_task(configuration: InputConfiguration) -> Task:
     if configuration == "cross_modal_pair":
         return "fusion"
     return DEFAULT_PAIR_TASK
-
-
-def _image_summary(image: PreparedImage) -> str:
-    info = image.info
-    bits = [
-        f"{info.filename}",
-        f"modality={info.modality}",
-        f"format={info.detected_format}",
-        f"size={info.width}x{info.height}",
-    ]
-    if info.is_georeferenced:
-        bits.append("georeferenced")
-    return ", ".join(bits)
 
 
 def _coerce_confidence(raw: Any) -> float:
@@ -238,7 +225,8 @@ class AgenticController:
         else:
             task, rationale = await self._classify(query, images, configuration)
             task_source = "auto"
-            router_model = self._settings.router_model
+            # Routing is plain code; no model is involved.
+            router_model = None
 
         entry = TOOL_REGISTRY[task]
         if configuration not in entry.accepts:
@@ -420,8 +408,30 @@ class AgenticController:
         step_timer = _Timer()
         model = self._settings.narration_model
         specialist_answer = str(payload.get("answer") or "")
-        # Narration is disabled.
-        return None, {}
+        try:
+            result = await narrate(
+                self._client, model=model, query=query, images=images, facts=facts
+            )
+        except (NarrationRejected, OpenRouterError) as exc:
+            reason = (
+                str(exc) if isinstance(exc, NarrationRejected)
+                else "the language model could not be reached"
+            )
+            warnings.append(
+                f"The plain-language summary was discarded because {reason}; "
+                "the fine-tuned model's own wording is shown instead."
+            )
+            steps.append(
+                TraceStep(
+                    stage="narrate",
+                    tool="plain-language-narrator",
+                    model=model,
+                    params={"regions": len(facts["regions"])},
+                    detail=f"Narration discarded: {exc}",
+                    duration_ms=step_timer.ms(),
+                )
+            )
+            return None, {}
 
         payload["answer"] = result.summary
         by_number = {region["number"]: region for region in facts["regions"]}
@@ -459,9 +469,20 @@ class AgenticController:
         images: list[PreparedImage],
         configuration: InputConfiguration,
     ) -> tuple[Task, str]:
-        """Rule-based deterministic routing."""
-        fallback = _fallback_task(configuration)
-        return fallback, f"Routed using rule-based deterministic logic."
+        """Rule-based deterministic routing, no model involved.
+
+        The input configuration decides the task; for a single image, a query
+        that asks to locate something goes to grounding instead.
+        """
+        if configuration == "single":
+            match = _GROUNDING_WORDS.search(query)
+            if match:
+                return "grounding", (
+                    f"Rule-based: one image, and the query asks to locate something "
+                    f"(\"{match.group(0).lower()}\"), so 'grounding'."
+                )
+        task = _fallback_task(configuration)
+        return task, f"Rule-based: a {configuration.replace('_', ' ')} input maps to '{task}'."
 
     def _select(self, entry: ToolEntry) -> tuple[str, str, str, bool]:
         """Choose between the fine-tuned specialist and the baseline."""
