@@ -61,12 +61,37 @@ class PairedBitemporalTransform:
         hflip_prob: float = 0.5,
         vflip_prob: float = 0.5,
         rotation_prob: float = 0.5,
+        degrade_prob: float = 0.3,
+        max_degrade_factor: float = 4.0,
+        photometric_prob: float = 0.8,
     ) -> None:
         self.image_size = image_size
         self.augment = augment
         self.hflip_prob = hflip_prob
         self.vflip_prob = vflip_prob
         self.rotation_prob = rotation_prob
+        # Resolution degradation: both images lose detail by the same factor, as
+        # if captured by a coarser sensor. The mask is left sharp on purpose.
+        self.degrade_prob = degrade_prob
+        self.max_degrade_factor = max_degrade_factor
+        # Independent colour jitter per image: acquisitions differ in season,
+        # sun angle and sensor, and that alone must not read as change.
+        self.photometric_prob = photometric_prob
+
+    def _degrade(self, img_t1: Any, img_t2: Any) -> tuple[Any, Any]:
+        factor = random.uniform(1.5, self.max_degrade_factor)
+        width, height = img_t1.size
+        small = (max(8, int(width / factor)), max(8, int(height / factor)))
+        return (
+            img_t1.resize(small, Image.BOX).resize((width, height), Image.BILINEAR),
+            img_t2.resize(small, Image.BOX).resize((width, height), Image.BILINEAR),
+        )
+
+    @staticmethod
+    def _jitter(image: Any) -> Any:
+        image = TF.adjust_brightness(image, random.uniform(0.8, 1.2))
+        image = TF.adjust_contrast(image, random.uniform(0.8, 1.2))
+        return TF.adjust_saturation(image, random.uniform(0.8, 1.2))
 
     def __call__(
         self,
@@ -133,6 +158,12 @@ class PairedBitemporalTransform:
                 img_t2 = TF.rotate(img_t2, angle)
                 if mask is not None:
                     mask = TF.rotate(mask, angle)
+
+            if Image is not None and isinstance(img_t1, Image.Image):
+                if random.random() < self.degrade_prob:
+                    img_t1, img_t2 = self._degrade(img_t1, img_t2)
+                if random.random() < self.photometric_prob:
+                    img_t1, img_t2 = self._jitter(img_t1), self._jitter(img_t2)
 
         # Convert to tensor
         if not isinstance(img_t1, torch.Tensor):

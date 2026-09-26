@@ -46,6 +46,10 @@ else:
         ImageDraw = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
+# Checkpoints trained before prepare.py recorded a GSD range were trained on
+# LEVIR-CD alone (0.5 m aerial imagery).
+LEGACY_GSD_RANGE_M = (0.5, 0.5)
+
 # Project imports
 # ---------------------------------------------------------------------------
 # Imported as a package, never via sys.path edits: the backend imports this
@@ -69,11 +73,23 @@ class ChangeVQAModel:
         config: ModelConfig | None = None,
         device: str = "cpu",
         image_size: int = 256,
+        gsd_range_m: tuple[float, float] = LEGACY_GSD_RANGE_M,
+        tile_overlap: int = 32,
+        max_tiled_edge: int = 2048,
+        tile_batch_size: int = 16,
     ) -> None:
         self.device = device
         self.config = config or ModelConfig()
         self.image_size = image_size
         self.model = model.to(self.device).eval()
+        # Ground sample distances (m/pixel) the training tiles covered.
+        self.gsd_range_m = gsd_range_m
+        # Images larger than one tile are analysed tile by tile at their own
+        # resolution instead of being squashed to image_size, which would erase
+        # the detail the change mask needs.
+        self.tile_overlap = tile_overlap
+        self.max_tiled_edge = max_tiled_edge
+        self.tile_batch_size = tile_batch_size
 
     @classmethod
     def from_checkpoint(
@@ -108,17 +124,30 @@ class ChangeVQAModel:
                 model.answers_vocab = ckpt["answers_vocab"]
             if "question_vocab" in ckpt:
                 model.tokenizer = SimpleTokenizer(ckpt["question_vocab"])
-            print(f"[ChangeVQAModel] Loaded checkpoint from {checkpoint_path} on {device}")
+            gsd_range = tuple(ckpt.get("gsd_range_m") or LEGACY_GSD_RANGE_M)
+            print(f"[ChangeVQAModel] Loaded checkpoint from {checkpoint_path} on {device} "
+                  f"(trained on {gsd_range[0]}-{gsd_range[1]} m/pixel)")
         else:
             config = ModelConfig()
             model = SiameseChangeVQA(config)
+            gsd_range = LEGACY_GSD_RANGE_M
             print(f"[ChangeVQAModel] Initialized model on {device} (no checkpoint specified or found)")
 
-        return cls(model=model, config=config, device=device)
+        return cls(model=model, config=config, device=device, gsd_range_m=gsd_range)  # type: ignore[arg-type]
 
     def _load_and_preprocess_image(self, img_input: str | Path | Image.Image | np.ndarray) -> tuple[torch.Tensor, tuple[int, int]]:
         """Load an image and convert to preprocessed tensor (1, 3, H, W)."""
-        orig_size = (256, 256)
+        img = self._to_rgb(img_input)
+        return self._to_tensor(img.resize((self.image_size, self.image_size))), img.size
+
+    def _to_tensor(self, img: Image.Image) -> torch.Tensor:
+        arr = np.array(img).astype(np.float32) / 255.0      # (H, W, 3)
+        tensor = torch.from_numpy(arr).permute(2, 0, 1)    # (3, H, W)
+        return normalize_image(tensor).unsqueeze(0).to(self.device)  # (1, 3, H, W)
+
+    @staticmethod
+    def _to_rgb(img_input: str | Path | Image.Image | np.ndarray) -> Image.Image:
+        """Load any supported input as an 8-bit RGB PIL image."""
         if isinstance(img_input, (str, Path)):
             path = Path(img_input)
             if not path.exists():
@@ -132,7 +161,6 @@ class ChangeVQAModel:
                         img = Image.fromarray(scaled).convert("RGB")
                     else:
                         img = raw_img.convert("RGB")
-            orig_size = img.size
         elif isinstance(img_input, np.ndarray):
             if img_input.dtype != np.uint8:
                 mn, mx = img_input.min(), img_input.max()
@@ -140,19 +168,50 @@ class ChangeVQAModel:
                 img = Image.fromarray(scaled).convert("RGB")
             else:
                 img = Image.fromarray(img_input).convert("RGB")
-            orig_size = img.size
         elif Image is not None and isinstance(img_input, Image.Image):
             img = img_input.convert("RGB")
-            orig_size = img.size
         else:
             raise ValueError(f"Unsupported image input type: {type(img_input)}")
+        return img
 
-        # Resize to model resolution
-        resized = img.resize((self.image_size, self.image_size))
-        arr = np.array(resized).astype(np.float32) / 255.0  # (H, W, 3)
-        tensor = torch.from_numpy(arr).permute(2, 0, 1)    # (3, H, W)
-        tensor = normalize_image(tensor).unsqueeze(0)       # (1, 3, H, W)
-        return tensor.to(self.device), orig_size
+    def _tile_starts(self, length: int) -> list[int]:
+        tile, stride = self.image_size, self.image_size - self.tile_overlap
+        starts = list(range(0, max(1, length - tile + 1), stride))
+        if starts[-1] + tile < length:
+            starts.append(length - tile)
+        return starts
+
+    @torch.no_grad()
+    def _tiled_change_mask(self, img_t1: Image.Image, img_t2: Image.Image, query: str) -> tuple[np.ndarray, int]:
+        """Change probability at the pair's own resolution, stitched from tiles.
+
+        Overlapping tiles are averaged so tile seams do not show in the mask.
+        Returns (mask, number of tiles).
+        """
+        tile = self.image_size
+        width, height = img_t1.size
+        # Bound the work for very large scenes, and make sure a tile fits.
+        scale = min(1.0, self.max_tiled_edge / max(width, height))
+        scale = max(scale, tile / min(width, height))
+        if scale != 1.0:
+            size = (max(tile, round(width * scale)), max(tile, round(height * scale)))
+            img_t1 = img_t1.resize(size, Image.BILINEAR)
+            img_t2 = img_t2.resize(size, Image.BILINEAR)
+            width, height = size
+
+        total = np.zeros((height, width), dtype=np.float32)
+        weight = np.zeros((height, width), dtype=np.float32)
+        boxes = [(x, y) for y in self._tile_starts(height) for x in self._tile_starts(width)]
+        for i in range(0, len(boxes), self.tile_batch_size):
+            batch = boxes[i : i + self.tile_batch_size]
+            t1 = torch.cat([self._to_tensor(img_t1.crop((x, y, x + tile, y + tile))) for x, y in batch])
+            t2 = torch.cat([self._to_tensor(img_t2.crop((x, y, x + tile, y + tile))) for x, y in batch])
+            probs = self.model(t1=t1, t2=t2, question_text=[query] * len(batch))["change_mask_prob"]
+            probs = probs[:, 0].float().cpu().numpy()
+            for (x, y), prob in zip(batch, probs):
+                total[y : y + tile, x : x + tile] += prob
+                weight[y : y + tile, x : x + tile] += 1.0
+        return total / np.maximum(weight, 1.0), len(boxes)
 
     def analyze_pair(
         self,
@@ -160,18 +219,33 @@ class ChangeVQAModel:
         img_t2: str | Path | Image.Image | np.ndarray,
         query: str = "What changed between these two dates?",
     ) -> dict[str, Any]:
-        """Run inference on an image pair and query string."""
+        """Run inference on an image pair and query string.
+
+        The answer comes from the whole scene at model resolution, so it can
+        take in context across the image. The change mask, and the boxes and
+        change share derived from it, come from tiles at the pair's own
+        resolution whenever the pair is larger than one tile.
+        """
         start_time = time.perf_counter()
 
-        t1_tensor, orig_size = self._load_and_preprocess_image(img_t1)
-        t2_tensor, _ = self._load_and_preprocess_image(img_t2)
+        rgb_t1, rgb_t2 = self._to_rgb(img_t1), self._to_rgb(img_t2)
+        orig_size = rgb_t1.size
+        if rgb_t2.size != rgb_t1.size:
+            rgb_t2 = rgb_t2.resize(rgb_t1.size, Image.BILINEAR)
+        scene = (self.image_size, self.image_size)
 
         with torch.no_grad():
             outputs = self.model(
-                t1=t1_tensor,
-                t2=t2_tensor,
+                t1=self._to_tensor(rgb_t1.resize(scene)),
+                t2=self._to_tensor(rgb_t2.resize(scene)),
                 question_text=[query],
             )
+
+        tiles = 1
+        if max(orig_size) > self.image_size * 1.25:
+            mask_prob, tiles = self._tiled_change_mask(rgb_t1, rgb_t2, query)
+        else:
+            mask_prob = outputs["change_mask_prob"][0, 0].float().cpu().numpy()
 
         exec_time_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -181,7 +255,6 @@ class ChangeVQAModel:
         # fixed confidences, so callers see what the fine-tuned model predicted.
         answer_text = outputs["predicted_answer_text"][0]
         answer_confidence = float(outputs["answer_confidence"][0])
-        mask_prob = outputs["change_mask_prob"][0, 0].float().cpu().numpy()
 
         bboxes = self.model.extract_bounding_boxes(
             mask_prob,
@@ -205,6 +278,7 @@ class ChangeVQAModel:
             "mask_prob": mask_prob,
             "execution_time_ms": round(exec_time_ms, 2),
             "original_size": orig_size,
+            "tiles": tiles,
         }
 
     @staticmethod

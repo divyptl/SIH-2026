@@ -50,6 +50,10 @@ from services.openrouter_client import (
 
 logger = logging.getLogger("satquery.controller")
 
+# A specialist accepts imagery up to this factor finer or coarser than the
+# range it was trained on; training applies resolution augmentation of up to 4x.
+GSD_TOLERANCE = 2.0
+
 VALID_TASKS: set[str] = set(TOOL_REGISTRY)
 
 
@@ -251,7 +255,14 @@ class AgenticController:
 
         # --- 3. Select the tool ----------------------------------------------
         step_timer = _Timer()
-        tool_name, backend, model_name, domain_adapted = self._select(entry)
+        use_specialist = entry.specialist_available
+        if use_specialist:
+            use_specialist, note = await asyncio.to_thread(self._check_resolution, entry, images)
+            if note:
+                warnings.append(note)
+        tool_name, backend, model_name, domain_adapted = (
+            self._select(entry) if use_specialist else self._baseline(entry)
+        )
         steps.append(
             TraceStep(
                 stage="select",
@@ -268,7 +279,7 @@ class AgenticController:
         payload: dict[str, Any] | None = None
         usage: dict[str, Any] = {}
         params: dict[str, Any]
-        if entry.runner is not None:
+        if domain_adapted and entry.runner is not None:
             params = {"checkpoint": entry.checkpoint}
             try:
                 payload = await asyncio.to_thread(entry.runner, query, images)
@@ -387,6 +398,40 @@ class AgenticController:
         if entry.specialist_available:
             return entry.name, "local_specialist", entry.specialist_model, True
         return self._baseline(entry)
+
+    @staticmethod
+    def _check_resolution(entry: ToolEntry, images: list[PreparedImage]) -> tuple[bool, str | None]:
+        """Whether the specialist was trained on imagery at this resolution.
+
+        Returns (use the specialist, note for the trace). A model shown imagery
+        far outside its training resolution answers confidently and wrongly, so
+        such inputs go to the baseline. Uploads without georeferencing have no
+        known resolution; they still reach the specialist, with a caveat.
+        """
+        if entry.gsd_range is None:
+            return True, None
+        try:
+            low, high = entry.gsd_range()
+        except Exception:
+            # Loading failed; the execute step reports it and falls back.
+            logger.exception("Could not read the training resolution of '%s'", entry.name)
+            return True, None
+        trained = f"{low:g} m" if low == high else f"{low:g}-{high:g} m"
+
+        known = [image.analysis_gsd_m for image in images if image.analysis_gsd_m is not None]
+        if not known:
+            return True, (
+                f"The input resolution is unknown (no georeferencing); the fine-tuned "
+                f"'{entry.task}' model is trained on {trained}/pixel imagery, so check "
+                "its answer against the images."
+            )
+        gsd = max(known)
+        if low / GSD_TOLERANCE <= gsd <= high * GSD_TOLERANCE:
+            return True, None
+        return False, (
+            f"The fine-tuned '{entry.task}' model is trained on {trained}/pixel imagery; "
+            f"this input is analysed at {gsd:.1f} m/pixel, so the general VLM answered instead."
+        )
 
     def _baseline(self, entry: ToolEntry) -> tuple[str, str, str, bool]:
         return f"{entry.name}-baseline", "openrouter", self._settings.vision_model, False

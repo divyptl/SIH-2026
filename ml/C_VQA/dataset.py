@@ -138,8 +138,9 @@ class CDVQADataset(Dataset):
         self.tokenizer = SimpleTokenizer(self.question_vocab)
 
         # Answers outside CANONICAL_ANSWERS used to silently map to index 0
-        # ("unchanged"), turning every such sample into label noise.
-        self.answer_vocab = answer_vocab or self._build_answer_vocab()
+        # ("unchanged"), turning every such sample into label noise. A dataset
+        # built by prepare.py fixes its vocabulary in dataset_info.json.
+        self.answer_vocab = answer_vocab or self._info_answer_vocab() or self._build_answer_vocab()
         self.answer_to_idx = {ans: i for i, ans in enumerate(self.answer_vocab)}
         self.idx_to_answer = dict(enumerate(self.answer_vocab))
 
@@ -166,6 +167,13 @@ class CDVQADataset(Dataset):
         known = set(vocab)
         vocab.extend(tok for tok, _ in counts.most_common() if tok not in known)
         return vocab
+
+    def _info_answer_vocab(self) -> list[str] | None:
+        info = self.root / "dataset_info.json"
+        if not info.exists():
+            return None
+        with open(info, "r", encoding="utf-8") as f:
+            return json.load(f).get("answer_vocab")
 
     def _build_answer_vocab(self) -> list[str]:
         # Canonical answers keep their original indices; dataset answers follow.
@@ -235,6 +243,10 @@ class CDVQADataset(Dataset):
                             "question": q_info.get("question", "What changed between these two dates?"),
                             "answer": q_info.get("answer", "unchanged"),
                             "change_type": q_info.get("change_type", s.get("change_type", "general")),
+                            "question_type": q_info.get("type", "unknown"),
+                            "source": s.get("source", "cdvqa"),
+                            "gsd_m": s.get("gsd_m"),
+                            "tile_id": s.get("id"),
                         })
                 else:
                     self.samples.append(s)
@@ -312,6 +324,10 @@ class CDVQADataset(Dataset):
             "raw_answer": raw_answer,
             "sample_id": sample_info.get("id", f"sample_{index:04d}"),
             "change_type": sample_info.get("change_type", "general"),
+            "question_type": sample_info.get("question_type", "unknown"),
+            "source": sample_info.get("source", "cdvqa"),
+            "gsd_m": sample_info.get("gsd_m"),
+            "tile_id": sample_info.get("tile_id") or sample_info.get("id", f"sample_{index:04d}"),
         }
 
         if mask_tensor is not None:
@@ -340,6 +356,10 @@ def cdvqa_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "raw_answers": [item["raw_answer"] for item in batch],
         "sample_ids": [item["sample_id"] for item in batch],
         "mask_targets": mask_batch,
+        "sources": [item["source"] for item in batch],
+        "question_types": [item["question_type"] for item in batch],
+        "gsds": [item["gsd_m"] for item in batch],
+        "tile_ids": [item["tile_id"] for item in batch],
     }
 
     return collated

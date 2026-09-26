@@ -179,6 +179,11 @@ def run_grounding(query: str, images: list[PreparedImage]) -> dict[str, Any]:
     return {"answer": answer, "confidence": detections[0]["score"], "evidence": evidence}
 
 
+def change_vqa_gsd_range() -> tuple[float, float]:
+    """Metres per pixel the Change-VQA checkpoint's training tiles covered."""
+    return _change_vqa.get().gsd_range_m
+
+
 def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
     """Answer a change question over a bi-temporal pair with the Siamese Change-VQA model."""
     result = _change_vqa.get().analyze_pair(_pil(images[0]), _pil(images[1]), query)

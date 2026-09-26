@@ -34,6 +34,15 @@ function formatMs(ms: number) {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`
 }
 
+/** Ground sample distance with precision that suits its scale: 0.31, 2.5, 10. */
+function formatGsd(metres: number) {
+  return metres < 1
+    ? metres.toFixed(2)
+    : metres < 10
+      ? metres.toFixed(1)
+      : Math.round(metres).toString()
+}
+
 const ENGLISH: Pick<Language, 'code' | 'dir'> = { code: 'en', dir: 'ltr' }
 
 export function AnalysisResult({ result, query }: AnalysisResultProps) {
@@ -226,6 +235,13 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
                     <span className="tabular-nums">
                       {info.width}&times;{info.height}
                     </span>
+                    {info.ground_sample_distance_m != null && (
+                      <span className="tabular-nums">
+                        {t('result.gsd', {
+                          value: formatGsd(info.ground_sample_distance_m),
+                        })}
+                      </span>
+                    )}
                     {info.is_georeferenced && (
                       <span>{t('result.georeferenced')}</span>
                     )}

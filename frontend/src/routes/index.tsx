@@ -42,10 +42,18 @@ import type { AnalysisResponse } from '#/lib/api'
 
 export const Route = createFileRoute('/')({ component: Home })
 
-const ACCEPTED_TYPES = ['image/tiff', 'image/x-tiff']
-const ACCEPTED_EXTENSIONS = ['.tif', '.tiff']
+const ACCEPTED_TYPES = ['image/tiff', 'image/x-tiff', 'image/png', 'image/jpeg']
+const ACCEPTED_EXTENSIONS = ['.tif', '.tiff', '.png', '.jpg', '.jpeg']
 // The picker needs both: some systems report no MIME type at all for GeoTIFF.
 const ACCEPT_ATTRIBUTE = [...ACCEPTED_TYPES, ...ACCEPTED_EXTENSIONS].join(',')
+
+/** Short format label for an attached file, from its extension. */
+function formatLabel(file: File) {
+  const extension = file.name.toLowerCase().split('.').pop() ?? ''
+  if (extension === 'png') return 'PNG'
+  if (extension === 'jpg' || extension === 'jpeg') return 'JPEG'
+  return 'TIFF'
+}
 const MAX_FILE_SIZE = 20 * 1024 * 1024
 const MAX_IMAGES = 2
 
@@ -251,7 +259,7 @@ function Home() {
                           variant="secondary"
                           className="h-4 px-1.5 text-[10px]"
                         >
-                          GeoTIFF
+                          {formatLabel(f)}
                         </Badge>
                         <span className="tabular-nums">
                           {formatBytes(f.size)}

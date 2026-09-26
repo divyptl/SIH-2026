@@ -18,7 +18,7 @@
     "addSecond": "Add a second image (optical+SAR pair or before/after)",
     "dropHere": "Drop images here",
     "browseHint": "or click to browse — one image, or two for a cross-modal / bi-temporal pair",
-    "imagesHelp": "Required. One georeferenced GeoTIFF (.tif/.tiff), or two for a co-registered optical+SAR pair or before/after comparison — each up to {{size}}.",
+    "imagesHelp": "Required. One image (GeoTIFF, PNG or JPEG), or two for a co-registered optical+SAR pair or before/after comparison — each up to {{size}}.",
     "previewAlt": "Preview of {{name}}",
     "remove": "Remove {{name}}",
     "promptLabel": "Prompt",
@@ -38,7 +38,7 @@
   "errors": {
     "tooManyFull": "Up to {{max}} images per analysis (a cross-modal or bi-temporal pair). Remove one first.",
     "tooManyPartial": "Up to {{max}} images per analysis. The extra images were not added.",
-    "unsupported": "Unsupported format. Upload a GeoTIFF (.tif/.tiff).",
+    "unsupported": "Unsupported format. Upload a GeoTIFF, PNG or JPEG image.",
     "tooLarge": "Image is too large. Keep it under {{size}}.",
     "imageRequired": "At least one image is required to run an analysis."
   },
@@ -51,6 +51,7 @@
     "confidence": "Confidence",
     "image": "Image {{index}}",
     "georeferenced": "georeferenced",
+    "gsd": "{{value}} m/pixel",
     "evidence": "Evidence ({{count}})",
     "noSpatial": "Items with no location on the image: {{count}}",
     "controllerNotes": "Notes from the controller",

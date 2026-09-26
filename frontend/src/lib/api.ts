@@ -48,6 +48,8 @@ export interface ImageInfo {
   height: number
   size_bytes: number
   is_georeferenced: boolean
+  /** Metres per pixel from the GeoTIFF tags; null when unknown. */
+  ground_sample_distance_m: number | null
   notes: Array<string>
   /** Server-rendered JPEG of exactly what the model was shown. */
   preview_data_uri: string | null

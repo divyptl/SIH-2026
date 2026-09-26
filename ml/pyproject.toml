@@ -26,6 +26,10 @@ train = [
     "matplotlib>=3.9.0",
     "kaggle>=1.6.0",
 ]
+# Exporting Sentinel-2 + Dynamic World change pairs (ml/C_VQA/gee_dynamic_world.py).
+gee = [
+    "earthengine-api>=1.0.0",
+]
 
 [build-system]
 requires = ["setuptools>=69"]

@@ -70,6 +70,10 @@ class ImageInfo(BaseModel):
     height: int
     size_bytes: int
     is_georeferenced: bool = False
+    ground_sample_distance_m: float | None = Field(
+        default=None,
+        description="Metres per pixel of the upload, from its GeoTIFF tags; null when unknown.",
+    )
     notes: list[str] = Field(default_factory=list)
     preview_data_uri: str | None = Field(
         default=None,

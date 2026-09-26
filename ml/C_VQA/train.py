@@ -12,8 +12,8 @@ Usage:
     # With custom flags:
     python -m ml.C_VQA.train --epochs 20 --batch-size 8 --backbone resnet18
 
-    # Resume from checkpoint:
-    python -m ml.C_VQA.train --resume checkpoints/change_detection/best.pt
+    # Multi-source dataset built by prepare.py, starting from an earlier checkpoint:
+    python -m ml.C_VQA.train --data-root data/change_vqa --init-from checkpoints/c_vqa_best.pt
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import json
 import math
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -81,8 +82,10 @@ class ChangeVQATrainer:
         train_cfg: TrainConfig,
         model_cfg: ModelConfig,
         device: str,
+        dataset_info: dict[str, Any] | None = None,
     ) -> None:
         self.model = model.to(device)
+        self.dataset_info = dataset_info or {}
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.cfg = train_cfg
@@ -186,16 +189,23 @@ class ChangeVQATrainer:
         }
 
     @torch.no_grad()
-    def evaluate(self) -> dict[str, float]:
-        """Evaluate model on the validation split."""
+    def evaluate(self) -> dict[str, Any]:
+        """Evaluate on the validation split, overall and per source.
+
+        Each source is scored separately so a small dataset (say, 10 m imagery)
+        is not drowned out by a large one; model selection uses their mean.
+        """
         if self.val_loader is None:
             return {}
 
         self.model.eval()
         total_loss = 0.0
-        total_vqa_acc = 0.0
-        total_mask_iou = 0.0
         num_batches = len(self.val_loader)
+        correct: dict[str, int] = defaultdict(int)
+        answered: dict[str, int] = defaultdict(int)
+        by_type: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+        overlap: dict[str, float] = defaultdict(float)
+        union: dict[str, float] = defaultdict(float)
 
         for batch in self.val_loader:
             t1 = batch["t1"].to(self.device)
@@ -205,16 +215,45 @@ class ChangeVQATrainer:
             mask_targets = batch["mask_targets"].to(self.device) if batch["mask_targets"] is not None else None
             with torch.amp.autocast("cuda", enabled=self.use_amp):
                 outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
-                loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
-
+                loss, _ = self.criterion(outputs, ans_targets, mask_targets)
             total_loss += loss.item()
-            total_vqa_acc += metrics.get("vqa_accuracy", 0.0)
-            total_mask_iou += metrics.get("mask_iou", 0.0)
 
+            hits = (outputs["answer_logits"].argmax(dim=-1) == ans_targets).tolist()
+            valid = (ans_targets != -100).tolist()
+            if mask_targets is not None:
+                pred = (outputs["change_mask_prob"].float() > 0.5).float()
+                target = mask_targets if mask_targets.dim() == 4 else mask_targets.unsqueeze(1)
+                inter = (pred * target).sum(dim=(1, 2, 3)).tolist()
+                either = ((pred + target) > 0).float().sum(dim=(1, 2, 3)).tolist()
+            else:
+                inter = either = [0.0] * len(hits)
+
+            for i, source in enumerate(batch["sources"]):
+                overlap[source] += inter[i]
+                union[source] += either[i]
+                if valid[i]:
+                    answered[source] += 1
+                    correct[source] += int(hits[i])
+                    stats = by_type[batch["question_types"][i]]
+                    stats[0] += int(hits[i])
+                    stats[1] += 1
+
+        per_source = {
+            source: {
+                "vqa_acc": correct[source] / max(1, answered[source]),
+                # No change anywhere in a source's val tiles counts as a perfect mask.
+                "mask_iou": overlap[source] / union[source] if union[source] else 1.0,
+            }
+            for source in sorted(set(answered) | set(union))
+        }
+        n = max(1, len(per_source))
         return {
             "val_loss": total_loss / max(1, num_batches),
-            "val_vqa_acc": total_vqa_acc / max(1, num_batches),
-            "val_mask_iou": total_mask_iou / max(1, num_batches),
+            "val_vqa_acc": sum(correct.values()) / max(1, sum(answered.values())),
+            "val_mask_iou": sum(overlap.values()) / max(1e-6, sum(union.values())),
+            "val_score": sum(0.5 * m["vqa_acc"] + 0.5 * m["mask_iou"] for m in per_source.values()) / n,
+            "val_per_source": per_source,
+            "val_per_question_type": {k: v[0] / max(1, v[1]) for k, v in sorted(by_type.items())},
         }
 
     def _build_checkpoint(self, epoch: int) -> dict[str, Any]:
@@ -230,6 +269,10 @@ class ChangeVQATrainer:
             "answers_vocab": self.model.answers_vocab,
             "question_vocab": self.model.tokenizer.vocab,
             "scaler": self.scaler.state_dict(),
+            # Ground sample distances the training tiles covered; the backend
+            # only routes imagery inside this range to the model.
+            "gsd_range_m": self.dataset_info.get("gsd_range_m"),
+            "sources": sorted(self.dataset_info.get("sources", {})),
         }
 
     def save_checkpoint(self, epoch: int, is_best: bool = False) -> None:
@@ -280,11 +323,14 @@ class ChangeVQATrainer:
                 print(
                     f"--> [Val Epoch {epoch:2d}] Loss: {val_metrics['val_loss']:.4f} | "
                     f"VQA Acc: {val_metrics['val_vqa_acc']:.1%} | "
-                    f"Mask IoU: {val_metrics['val_mask_iou']:.3f}"
+                    f"Mask IoU: {val_metrics['val_mask_iou']:.3f} | "
+                    f"Score (mean over sources): {val_metrics['val_score']:.3f}"
                 )
+                for source, m in val_metrics["val_per_source"].items():
+                    print(f"      {source:18} VQA Acc {m['vqa_acc']:.1%} | Mask IoU {m['mask_iou']:.3f}")
 
-                # Composite metric: 0.5 * VQA_Acc + 0.5 * Mask_IoU
-                composite_score = 0.5 * val_metrics["val_vqa_acc"] + 0.5 * val_metrics["val_mask_iou"]
+                # Composite metric: mean over sources of 0.5 * VQA_Acc + 0.5 * Mask_IoU
+                composite_score = val_metrics["val_score"]
                 is_best = composite_score > self.best_metric
                 if is_best:
                     self.best_metric = composite_score
@@ -312,6 +358,16 @@ def train_main(args: argparse.Namespace) -> None:
         backbone=args.backbone,
         pretrained=not args.no_pretrained,
     )
+    dataset_info_path = Path(args.data_root) / "dataset_info.json"
+    dataset_info = json.loads(dataset_info_path.read_text()) if dataset_info_path.exists() else {}
+    if args.init_from:
+        # The architecture must match the checkpoint being fine-tuned.
+        init_cfg = torch.load(args.init_from, map_location="cpu", weights_only=False).get("model_config", {})
+        for key in ("backbone", "visual_feature_dim", "text_embed_dim", "mask_hidden_dim",
+                    "cross_attention_layers", "num_cross_attention_heads", "feedforward_dim",
+                    "spatial_token_resolution", "answer_hidden_dim"):
+            if key in init_cfg:
+                setattr(model_cfg, key, init_cfg[key])
     train_cfg = TrainConfig(
         data_root=args.data_root,
         batch_size=args.batch_size,
@@ -353,21 +409,17 @@ def train_main(args: argparse.Namespace) -> None:
         print(f"[ChangeVQATrainer] Validation split not available or empty ({e}); continuing with train split only.")
         val_ds = None
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=train_cfg.batch_size,
-        shuffle=True,
-        collate_fn=cdvqa_collate_fn,
-        num_workers=0,  # Cross-platform safe
-    )
+    # Workers decode PNG tiles in parallel; 0 stays the safe default on Windows.
+    loader_args: dict[str, Any] = {
+        "batch_size": train_cfg.batch_size,
+        "collate_fn": cdvqa_collate_fn,
+        "num_workers": args.num_workers,
+        "pin_memory": device == "cuda",
+        "persistent_workers": args.num_workers > 0,
+    }
+    train_loader = DataLoader(train_ds, shuffle=True, **loader_args)
     val_loader = (
-        DataLoader(
-            val_ds,
-            batch_size=train_cfg.batch_size,
-            shuffle=False,
-            collate_fn=cdvqa_collate_fn,
-            num_workers=0,
-        )
+        DataLoader(val_ds, shuffle=False, **loader_args)
         if val_ds is not None
         else None
     )
@@ -383,6 +435,8 @@ def train_main(args: argparse.Namespace) -> None:
     model = SiameseChangeVQA(config=model_cfg)
     model.tokenizer = SimpleTokenizer(train_ds.question_vocab)
     model.answers_vocab = list(train_ds.answer_vocab)
+    if args.init_from:
+        load_matching_weights(model, args.init_from)
     trainer = ChangeVQATrainer(
         model=model,
         train_loader=train_loader,
@@ -390,9 +444,26 @@ def train_main(args: argparse.Namespace) -> None:
         train_cfg=train_cfg,
         model_cfg=model_cfg,
         device=device,
+        dataset_info=dataset_info,
     )
 
     trainer.fit()
+
+
+def load_matching_weights(model: SiameseChangeVQA, checkpoint_path: str) -> None:
+    """Initialise from a checkpoint, skipping tensors whose shape changed.
+
+    The vision backbone, difference module and mask head carry over; the text
+    embedding and answer head are resized to the new vocabularies and so
+    start fresh.
+    """
+    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)["model"]
+    own = model.state_dict()
+    matching = {k: v for k, v in state.items() if k in own and own[k].shape == v.shape}
+    model.load_state_dict(matching, strict=False)
+    skipped = sorted(k for k in state if k not in matching)
+    print(f"[ChangeVQATrainer] Initialised {len(matching)}/{len(own)} tensors from {checkpoint_path}; "
+          f"{len(skipped)} re-initialised (e.g. {skipped[:3]})")
 
 
 if __name__ == "__main__":
@@ -405,6 +476,9 @@ if __name__ == "__main__":
     parser.add_argument("--no-pretrained", action="store_true", help="Do not load ImageNet weights")
     parser.add_argument("--checkpoint-dir", default="checkpoints/change_detection", help="Directory to save checkpoints")
     parser.add_argument("--device", default="auto", help="Device (auto, cuda, cpu)")
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers (use 2-4 on Kaggle)")
+    parser.add_argument("--init-from", default=None,
+                        help="Checkpoint to initialise matching weights from (e.g. checkpoints/c_vqa_best.pt)")
 
     cli_args = parser.parse_args()
     train_main(cli_args)

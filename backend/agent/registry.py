@@ -45,6 +45,10 @@ class ToolEntry:
     # Human-readable weights the runner serves, for the trace and the registry.
     checkpoint: str | None = None
 
+    # (min, max) metres per pixel the specialist was trained on, or None when it
+    # declares no range. Called lazily, since reading it may load the model.
+    gsd_range: Callable[[], tuple[float, float]] | None = None
+
     # Parameters the controller is permitted to configure for this tool.
     permitted_params: tuple[str, ...] = field(default=("temperature", "max_tokens"))
 
@@ -105,6 +109,7 @@ TOOL_REGISTRY: dict[Task, ToolEntry] = {
         description="Answers a question about what changed between two co-located dates.",
         accepts=("bi_temporal_pair",),
         specialist_module="ml.C_VQA",
+        gsd_range=specialists.change_vqa_gsd_range,
         **_specialist(specialists.run_change_vqa, _settings.change_vqa_checkpoint),
     ),
     "change_description": ToolEntry(
@@ -113,6 +118,7 @@ TOOL_REGISTRY: dict[Task, ToolEntry] = {
         description="Describes and localises change between two co-located dates.",
         accepts=("bi_temporal_pair",),
         specialist_module="ml.C_VQA",
+        gsd_range=specialists.change_vqa_gsd_range,
         **_specialist(specialists.run_change_vqa, _settings.change_vqa_checkpoint),
     ),
     "fusion": ToolEntry(

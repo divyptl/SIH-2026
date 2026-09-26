@@ -71,8 +71,9 @@ All settings are environment variables, read from `backend/.env`.
 | `task` | no | Force a task instead of routing: `vqa`, `caption`, `grounding`, `change_vqa`, `change_description`, `fusion`. |
 | `language` | no | The user's language code (`hi`, `ta`, `ur`, … — see `/api/languages`). Picks between languages that share a script and sets the answer language. |
 
-Accepted format: georeferenced GeoTIFF (`.tif`/`.tiff`) only — a plain TIFF
-with no CRS or pixel-to-world transform is rejected. Rasters are normalised to
+Accepted formats: GeoTIFF, TIFF, PNG and JPEG (`.tif`/`.tiff`/`.png`/`.jpg`/`.jpeg`).
+Only a GeoTIFF carries georeferencing; for the other formats evidence is
+reported in image pixels and the trace notes it. Rasters are normalised to
 8-bit RGB — 16-bit and single-band SAR products are contrast-stretched, which a
 browser cannot do — and the response carries that normalised render back as
 `inputs[].preview_data_uri` so evidence boxes overlay the exact raster the

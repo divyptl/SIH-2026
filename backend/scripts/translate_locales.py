@@ -15,7 +15,7 @@ are kept out of the model: the text around them is translated piecewise.
 Every output is checked before it is written. A string is rejected — left out of
 the locale, so the UI shows English for it and the next run retries it — when
 the model leaks letters from another script, or mangles a technical term that
-must stay verbatim (GeoTIFF, .tif/.tiff, SAR, VQA). The distilled model does
+must stay verbatim (GeoTIFF, .tif/.tiff, PNG, JPEG, SAR, VQA). The distilled model does
 both for low-resource languages such as Santali and Manipuri.
 """
 
@@ -40,7 +40,7 @@ _PROTECTED = re.compile(r"(\{\{\s*\w+\s*\}\}|<[^>]+>)")
 _TRAILING_STOP = re.compile("[.।॥۔᱾꯫]+$")
 _ENDS_WITH_PUNCTUATION = re.compile(r"[.!?…:]$")
 # Terms that must survive translation character for character.
-_VERBATIM = re.compile(r"GeoTIFF|\.tif/\.tiff|SAR|VQA")
+_VERBATIM = re.compile(r"GeoTIFF|\.tif/\.tiff|PNG|JPEG|SAR|VQA")
 # Unicode character-name prefix of each script's letters.
 _SCRIPT_NAMES = {
     "Deva": "DEVANAGARI",
