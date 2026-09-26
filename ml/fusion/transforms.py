@@ -61,16 +61,12 @@ class PairedTransform:
 
         # --- Geometric augmentations (same for both) ---
 
-        # True Random Resized Crop (crucial for breaking overfitting)
-        i, j, ch, cw = T.RandomResizedCrop.get_params(
-            sar, scale=(0.5, 1.0), ratio=(0.75, 1.33)
-        )
+        # In satellite imagery, resizing breaks the Ground Sample Distance (GSD).
+        # Since the raw images are 256x256 and target is 224x224, we can take a 
+        # random 224x224 crop. This provides spatial augmentation without scaling!
+        i, j, ch, cw = T.RandomCrop.get_params(sar, (self.size, self.size))
         sar = TF.crop(sar, i, j, ch, cw)
         optical = TF.crop(optical, i, j, ch, cw)
-
-        # Resize to target
-        sar = TF.resize(sar, [self.size, self.size], antialias=True)
-        optical = TF.resize(optical, [self.size, self.size], antialias=True)
 
         # Random horizontal flip
         if random.random() > 0.5:
