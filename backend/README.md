@@ -223,7 +223,7 @@ not a model.
 | `grounding` | Fine-tuned GroundingDINO + re-ranker ensemble (`ml.grounding`) | `checkpoints/grounding/v1/best.pt` |
 | `change_vqa`, `change_description` | Siamese Change-VQA (`ml.C_VQA`) | `checkpoints/c_vqa_best.pt` |
 | `fusion` | Optical–SAR dual encoder with terrain head (`ml.fusion`) | `checkpoints/fusion_best.pt` |
-| `vqa`, `caption` | — (SkyEyeGPT in `ml/vqa` is not wired in yet) | — |
+| `vqa`, `caption` | — (the `ml/vqa` classifier is not trained or wired in yet) | — |
 
 The fusion loader sizes the terrain head from the checkpoint:
 `fusion_best.pt` has 4 land types (agri, barrenland, grassland, urban), trained
