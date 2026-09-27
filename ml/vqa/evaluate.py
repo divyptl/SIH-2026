@@ -89,8 +89,8 @@ def run_eval(
     limit: Optional[int] = None,
     checkpoint: Optional[str] = None,
 ) -> dict:
-    from ml.vqa.config import VQAConfig
-    config = VQAConfig()
+    from ml.vqa.config import ModelConfig
+    config = ModelConfig()
     if checkpoint:
         config.checkpoint_path = Path(checkpoint)
     

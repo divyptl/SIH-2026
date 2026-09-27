@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover
         model_name: str
         execution_time_ms: float
 
-from .config import VQAConfig, DEFAULT_CONFIG, SUPPORTED_MODALITIES
+from .config import ModelConfig
 from .model import VQAModel as CoreVQAModel
 from .preprocessing import (
     load_image,
@@ -62,8 +62,9 @@ class VQAModel:
     interface expected by the controller.
     """
 
-    def __init__(self, backend: Optional[CoreVQAModel] = None, config: VQAConfig = DEFAULT_CONFIG):
-        self.config = config
+    def __init__(self, backend: Optional[CoreVQAModel] = None, config: Optional[ModelConfig] = None):
+        self.config = config or ModelConfig()
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self._backend = backend
         self.transform = transforms.Compose([
             transforms.Resize((256, 256)),

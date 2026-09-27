@@ -95,3 +95,9 @@ class TrainConfig:
                 pass
             return "cpu"
         return self.device
+
+# ---------------------------------------------------------------------------
+# Supported inputs (Used by preprocessing.py)
+# ---------------------------------------------------------------------------
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+DEFAULT_MULTISPECTRAL_RGB_BANDS = (3, 2, 1)  # (Red, Green, Blue) 1-indexed band positions
