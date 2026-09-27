@@ -14,6 +14,7 @@ import {
   CheckBadge,
   ConfidenceRow,
   EASE,
+  FillBar,
   Frame,
   InputsStep,
   RouteStep,
@@ -24,6 +25,14 @@ import {
 } from '#/components/demo/kit'
 import type { RecordedRun } from '#/components/demo/kit'
 import type { Scenario } from '#/components/demo/scenario'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '#/components/ui/card'
+import { Separator } from '#/components/ui/separator'
 import type { BoundingBox } from '#/lib/api'
 import recorded from './tanks-run.json'
 
@@ -85,29 +94,34 @@ function ModelStep() {
         ))}
       </div>
 
-      <Appear
-        delay={2.2}
-        className="grid gap-6 rounded-xl bg-card p-5 ring-1 ring-foreground/10 sm:grid-cols-[auto_1fr]"
-      >
-        <div>
-          <p className="font-heading text-5xl font-semibold">
-            {percent(benchmark.accuracy)}
-          </p>
-          <p className="mt-1 max-w-56 text-sm text-muted-foreground">
-            of {benchmark.queries.toLocaleString('en-IN')} VRSBench validation
-            questions answered with the right box
-          </p>
-        </div>
-        <div className="flex flex-col justify-center gap-2 text-sm">
-          <Bar label="SatQuery AI" value={benchmark.accuracy} strong />
-          {benchmark.published.map((entry) => (
-            <Bar key={entry.name} label={entry.name} value={entry.accuracy} />
-          ))}
-          <p className="mt-1 text-xs text-muted-foreground">
-            Published results on the same benchmark. For storage tanks alone,
-            SatQuery AI gets {percent(benchmark.storageTanks)}.
-          </p>
-        </div>
+      <Appear delay={2.2}>
+        <Card>
+          <CardContent className="grid gap-6 sm:grid-cols-[auto_1fr]">
+            <div>
+              <p className="font-heading text-5xl font-semibold">
+                {percent(benchmark.accuracy)}
+              </p>
+              <p className="mt-1 max-w-56 text-sm text-muted-foreground">
+                of {benchmark.queries.toLocaleString('en-IN')} VRSBench
+                validation questions answered with the right box
+              </p>
+            </div>
+            <div className="flex flex-col justify-center gap-2 text-sm">
+              <Bar label="SatQuery AI" value={benchmark.accuracy} strong />
+              {benchmark.published.map((entry) => (
+                <Bar
+                  key={entry.name}
+                  label={entry.name}
+                  value={entry.accuracy}
+                />
+              ))}
+              <p className="mt-1 text-xs text-muted-foreground">
+                Published results on the same benchmark. For storage tanks
+                alone, SatQuery AI gets {percent(benchmark.storageTanks)}.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
       </Appear>
     </div>
   )
@@ -134,15 +148,16 @@ function Stage({
           <ArrowRightIcon className="size-5" />
         </motion.span>
       )}
-      <Appear
-        delay={0.3 + index * 0.6}
-        className="rounded-xl bg-card p-5 ring-1 ring-foreground/10"
-      >
-        <p className="flex items-center gap-2 font-heading text-lg font-semibold">
-          {index === 0 && <CpuIcon className="size-5" />}
-          {title}
-        </p>
-        <p className="mt-2 text-sm/6 text-muted-foreground">{body}</p>
+      <Appear delay={0.3 + index * 0.6}>
+        <Card className="h-full">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              {index === 0 && <CpuIcon />}
+              {title}
+            </CardTitle>
+            <CardDescription>{body}</CardDescription>
+          </CardHeader>
+        </Card>
       </Appear>
     </>
   )
@@ -162,14 +177,12 @@ function Bar({
       <span className={strong ? 'font-medium' : 'text-muted-foreground'}>
         {label}
       </span>
-      <span className="h-2 overflow-hidden rounded-full bg-muted">
-        <motion.span
-          className={`block h-full rounded-full ${strong ? 'bg-fuchsia-500' : 'bg-foreground/40'}`}
-          initial={{ width: 0 }}
-          animate={{ width: `${value * 100}%` }}
-          transition={{ delay: 2.5, duration: 0.8, ease: EASE }}
-        />
-      </span>
+      <FillBar
+        value={value * 100}
+        delay={2.5}
+        duration={0.8}
+        tone={strong ? 'accent' : 'muted'}
+      />
       <span className="text-end tabular-nums">{percent(value)}</span>
     </div>
   )
@@ -247,7 +260,8 @@ function FindStep() {
                 benchmark the model was not trained on.
               </p>
             </div>
-            <div className="flex items-center gap-3 border-t pt-4">
+            <Separator />
+            <div className="flex items-center gap-3">
               <CheckBadge />
               <p>
                 <span className="font-heading text-3xl font-semibold tabular-nums">

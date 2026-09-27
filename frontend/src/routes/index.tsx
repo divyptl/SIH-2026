@@ -17,12 +17,14 @@ import { Hero } from '#/components/hero'
 import { ResultEmpty } from '#/components/result-empty'
 import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
 import { Button } from '#/components/ui/button'
+import { Card } from '#/components/ui/card'
 import {
   Field,
   FieldDescription,
   FieldError,
   FieldLabel,
 } from '#/components/ui/field'
+import { Input } from '#/components/ui/input'
 import {
   InputGroup,
   InputGroupAddon,
@@ -30,6 +32,7 @@ import {
   InputGroupText,
   InputGroupTextarea,
 } from '#/components/ui/input-group'
+import { Separator } from '#/components/ui/separator'
 import { Spinner } from '#/components/ui/spinner'
 import { ApiError, analyse } from '#/lib/api'
 import type { AnalysisResponse } from '#/lib/api'
@@ -192,160 +195,164 @@ function Home() {
       <Hero />
 
       <div className="mx-auto flex max-w-6xl flex-col gap-12 px-4 pb-20 sm:px-6">
-        <form
-          onSubmit={handleSubmit}
-          className="grid overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]"
-        >
-          <Field
-            data-invalid={error ? true : undefined}
-            className="gap-3 p-4 sm:p-5"
-          >
-            <FieldLabel htmlFor="image" className="font-heading text-base">
-              {t('home.imagesLabel')}
-            </FieldLabel>
-
-            <input
-              ref={inputRef}
-              id="image"
-              name="image"
-              type="file"
-              accept={ACCEPT_ATTRIBUTE}
-              multiple={files.length < MAX_IMAGES - 1}
-              aria-required
-              className="sr-only"
-              onChange={(e) => {
-                addFiles(Array.from(e.target.files ?? []))
-                e.target.value = ''
-              }}
-            />
-
-            <div className="grid grid-cols-2 gap-3">
-              {Array.from({ length: MAX_IMAGES }, (_, slot) => {
-                const file = files.at(slot)
-                return (
-                  <AnimatePresence key={slot} mode="popLayout" initial={false}>
-                    <motion.div
-                      key={
-                        file
-                          ? `${file.name}-${file.size}-${file.lastModified}`
-                          : 'empty'
-                      }
-                      initial={{ opacity: 0, scale: 0.97 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.97 }}
-                      transition={{ duration: 0.18 }}
-                    >
-                      {file ? (
-                        <FilledSlot
-                          file={file}
-                          // Browsers cannot show GeoTIFF; after an analysis the
-                          // server's rendering of it can stand in.
-                          serverPreview={
-                            result?.inputs.find(
-                              (info) => info.filename === file.name,
-                            )?.preview_data_uri
-                          }
-                          onRemove={() => removeFile(slot)}
-                        />
-                      ) : (
-                        <EmptySlot
-                          primary={slot === 0}
-                          isDragging={isDragging}
-                          dropHandlers={dropHandlers}
-                          onPick={() => inputRef.current?.click()}
-                        />
-                      )}
-                    </motion.div>
-                  </AnimatePresence>
-                )
-              })}
-            </div>
-
-            <FieldDescription className="text-xs/relaxed">
-              {t('home.imagesHelp', { size: formatBytes(MAX_FILE_SIZE) })}
-            </FieldDescription>
-            {error ? <FieldError>{error}</FieldError> : null}
-          </Field>
-
-          <div className="flex flex-col gap-5 border-t p-4 sm:p-5 lg:border-s lg:border-t-0">
-            <Field className="gap-3">
-              <FieldLabel htmlFor="prompt" className="font-heading text-base">
-                {t('home.promptLabel')}
+        <form onSubmit={handleSubmit}>
+          <Card className="grid gap-0 py-0 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+            <Field
+              data-invalid={error ? true : undefined}
+              className="gap-3 p-4 sm:p-5"
+            >
+              <FieldLabel htmlFor="image" className="font-heading text-base">
+                {t('home.imagesLabel')}
               </FieldLabel>
-              <InputGroup>
-                <InputGroupTextarea
-                  ref={promptRef}
-                  id="prompt"
-                  name="prompt"
-                  dir="auto"
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  onKeyDown={(e) => {
-                    // Ctrl/Cmd+Enter submits, the usual shortcut for multi-line inputs.
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                      e.preventDefault()
-                      e.currentTarget.form?.requestSubmit()
-                    }
-                  }}
-                  placeholder={t('home.promptPlaceholder')}
-                  aria-required
-                  aria-describedby="prompt-hint"
-                  className="min-h-28 text-base"
-                />
-                <InputGroupAddon align="block-end">
-                  <InputGroupButton
-                    type="button"
-                    disabled={files.length >= MAX_IMAGES}
-                    onClick={() => inputRef.current?.click()}
-                  >
-                    <PaperclipIcon />
-                    {files.length > 0
-                      ? t('home.addImage')
-                      : t('home.attachImage')}
-                  </InputGroupButton>
-                  <InputGroupText className="ms-auto text-xs tabular-nums">
-                    {files.length === 0
-                      ? t('home.noAttachment')
-                      : t('home.attachments', { count: files.length })}
-                  </InputGroupText>
-                </InputGroupAddon>
-              </InputGroup>
 
-              <PromptSuggestions
-                imageCount={files.length}
-                onPick={applyExample}
+              <Input
+                ref={inputRef}
+                id="image"
+                name="image"
+                type="file"
+                accept={ACCEPT_ATTRIBUTE}
+                multiple={files.length < MAX_IMAGES - 1}
+                aria-required
+                className="sr-only"
+                onChange={(e) => {
+                  addFiles(Array.from(e.target.files ?? []))
+                  e.target.value = ''
+                }}
               />
 
-              <FieldDescription id="prompt-hint" className="text-xs/relaxed">
-                {t('home.promptHint')}
+              <div className="grid grid-cols-2 gap-3">
+                {Array.from({ length: MAX_IMAGES }, (_, slot) => {
+                  const file = files.at(slot)
+                  return (
+                    <AnimatePresence
+                      key={slot}
+                      mode="popLayout"
+                      initial={false}
+                    >
+                      <motion.div
+                        key={
+                          file
+                            ? `${file.name}-${file.size}-${file.lastModified}`
+                            : 'empty'
+                        }
+                        initial={{ opacity: 0, scale: 0.97 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.97 }}
+                        transition={{ duration: 0.18 }}
+                      >
+                        {file ? (
+                          <FilledSlot
+                            file={file}
+                            // Browsers cannot show GeoTIFF; after an analysis the
+                            // server's rendering of it can stand in.
+                            serverPreview={
+                              result?.inputs.find(
+                                (info) => info.filename === file.name,
+                              )?.preview_data_uri
+                            }
+                            onRemove={() => removeFile(slot)}
+                          />
+                        ) : (
+                          <EmptySlot
+                            primary={slot === 0}
+                            isDragging={isDragging}
+                            dropHandlers={dropHandlers}
+                            onPick={() => inputRef.current?.click()}
+                          />
+                        )}
+                      </motion.div>
+                    </AnimatePresence>
+                  )
+                })}
+              </div>
+
+              <FieldDescription className="text-xs/relaxed">
+                {t('home.imagesHelp', { size: formatBytes(MAX_FILE_SIZE) })}
               </FieldDescription>
+              {error ? <FieldError>{error}</FieldError> : null}
             </Field>
 
-            <div className="mt-auto flex items-center gap-2 border-t pt-4">
-              <Button
-                type="button"
-                variant="ghost"
-                disabled={files.length === 0 && !prompt && !result}
-                onClick={reset}
-              >
-                <RotateCcwIcon data-icon="inline-start" />
-                {t('home.reset')}
-              </Button>
-              <Button
-                type="submit"
-                size="lg"
-                disabled={!canSubmit}
-                className="ms-auto px-5"
-              >
-                {isAnalysing ? (
-                  <Spinner data-icon="inline-start" />
-                ) : (
-                  <ScanSearchIcon data-icon="inline-start" />
-                )}
-                {isAnalysing ? t('home.analyzing') : t('home.analyze')}
-              </Button>
+            <div className="flex flex-col gap-5 border-t p-4 sm:p-5 lg:border-s lg:border-t-0">
+              <Field className="gap-3">
+                <FieldLabel htmlFor="prompt" className="font-heading text-base">
+                  {t('home.promptLabel')}
+                </FieldLabel>
+                <InputGroup>
+                  <InputGroupTextarea
+                    ref={promptRef}
+                    id="prompt"
+                    name="prompt"
+                    dir="auto"
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Ctrl/Cmd+Enter submits, the usual shortcut for multi-line inputs.
+                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault()
+                        e.currentTarget.form?.requestSubmit()
+                      }
+                    }}
+                    placeholder={t('home.promptPlaceholder')}
+                    aria-required
+                    aria-describedby="prompt-hint"
+                    className="min-h-28 text-base"
+                  />
+                  <InputGroupAddon align="block-end">
+                    <InputGroupButton
+                      type="button"
+                      disabled={files.length >= MAX_IMAGES}
+                      onClick={() => inputRef.current?.click()}
+                    >
+                      <PaperclipIcon />
+                      {files.length > 0
+                        ? t('home.addImage')
+                        : t('home.attachImage')}
+                    </InputGroupButton>
+                    <InputGroupText className="ms-auto text-xs tabular-nums">
+                      {files.length === 0
+                        ? t('home.noAttachment')
+                        : t('home.attachments', { count: files.length })}
+                    </InputGroupText>
+                  </InputGroupAddon>
+                </InputGroup>
+
+                <PromptSuggestions
+                  imageCount={files.length}
+                  onPick={applyExample}
+                />
+
+                <FieldDescription id="prompt-hint" className="text-xs/relaxed">
+                  {t('home.promptHint')}
+                </FieldDescription>
+              </Field>
+
+              <Separator className="mt-auto" />
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={files.length === 0 && !prompt && !result}
+                  onClick={reset}
+                >
+                  <RotateCcwIcon data-icon="inline-start" />
+                  {t('home.reset')}
+                </Button>
+                <Button
+                  type="submit"
+                  size="lg"
+                  disabled={!canSubmit}
+                  className="ms-auto px-5"
+                >
+                  {isAnalysing ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : (
+                    <ScanSearchIcon data-icon="inline-start" />
+                  )}
+                  {isAnalysing ? t('home.analyzing') : t('home.analyze')}
+                </Button>
+              </div>
             </div>
-          </div>
+          </Card>
         </form>
 
         <section

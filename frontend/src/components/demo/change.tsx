@@ -29,6 +29,16 @@ import {
 } from '#/components/demo/kit'
 import type { RecordedRun } from '#/components/demo/kit'
 import type { Scenario } from '#/components/demo/scenario'
+import { Badge } from '#/components/ui/badge'
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '#/components/ui/card'
+import { Separator } from '#/components/ui/separator'
 import type { BoundingBox } from '#/lib/api'
 import recorded from './assam-run.json'
 
@@ -86,98 +96,106 @@ function ModelStep() {
   return (
     <div className="flex h-full flex-col justify-center gap-8">
       <div className="grid gap-4 sm:grid-cols-2">
-        <motion.div
-          animate={{ opacity: landed ? 1 : 0.8 }}
-          className={cn(
-            'rounded-xl p-5 ring-1 transition-shadow duration-500',
-            landed
-              ? 'bg-card ring-2 ring-foreground'
-              : 'bg-card ring-foreground/10',
-          )}
-        >
-          <div className="flex items-center gap-2">
-            <CpuIcon className="size-5" />
-            <p className="font-heading text-lg font-semibold">
-              Fine-tuned {model.name}
-            </p>
-            {landed && <CheckBadge className="ms-auto" />}
-          </div>
-          <p className="mt-2 text-sm/6 text-muted-foreground">
-            {model.backbone}, trained on {model.sources.join(' and ')} pairs.
-            Knows {model.answers} kinds of change.
-          </p>
+        <motion.div animate={{ opacity: landed ? 1 : 0.8 }}>
+          <Card
+            className={cn(
+              'h-full transition-shadow duration-500',
+              landed && 'ring-2 ring-foreground',
+            )}
+          >
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <CpuIcon />
+                Fine-tuned {model.name}
+              </CardTitle>
+              {landed && (
+                <CardAction>
+                  <CheckBadge />
+                </CardAction>
+              )}
+              <CardDescription>
+                {model.backbone}, trained on {model.sources.join(' and ')}{' '}
+                pairs. Knows {model.answers} kinds of change.
+              </CardDescription>
+            </CardHeader>
+          </Card>
         </motion.div>
-        <motion.div
-          animate={{ opacity: landed ? 0.45 : 0.8 }}
-          className="rounded-xl bg-card p-5 ring-1 ring-foreground/10"
-        >
-          <div className="flex items-center gap-2">
-            <BanIcon className="size-5" />
-            <p className="font-heading text-lg font-semibold">
-              Outside the range
-            </p>
-          </div>
-          <p className="mt-2 text-sm/6 text-muted-foreground">
-            Imagery far outside the trained range is not given to the fine-tuned
-            model, and the result carries a warning saying why.
-          </p>
+        <motion.div animate={{ opacity: landed ? 0.45 : 0.8 }}>
+          <Card className="h-full">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <BanIcon />
+                Outside the range
+              </CardTitle>
+              <CardDescription>
+                Imagery far outside the trained range is not given to the
+                fine-tuned model, and the result carries a warning saying why.
+              </CardDescription>
+            </CardHeader>
+          </Card>
         </motion.div>
       </div>
 
-      <div className="rounded-xl bg-card p-5 ring-1 ring-foreground/10">
-        <p className="text-sm text-muted-foreground">
-          Is this image close to what the model was trained on?
-        </p>
-        <div className="relative mt-10 mb-8 h-3 rounded-full bg-muted">
-          <div
-            className="absolute inset-y-0 rounded-full bg-foreground/15"
-            style={{
-              left: `${gsdPosition(tolerated[0])}%`,
-              right: `${100 - gsdPosition(tolerated[1])}%`,
-            }}
-          />
-          <div
-            className="absolute inset-y-0 rounded-full bg-foreground/45"
-            style={{
-              left: `${gsdPosition(low)}%`,
-              right: `${100 - gsdPosition(high)}%`,
-            }}
-          />
-          <motion.div
-            className="absolute top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center"
-            initial={{
-              left: reduceMotion ? `${gsdPosition(model.analysisGsd)}%` : '98%',
-            }}
-            animate={{ left: `${gsdPosition(model.analysisGsd)}%` }}
-            transition={{ delay: 0.6, duration: 1.6, ease: EASE }}
-            onAnimationComplete={() => setLanded(true)}
-          >
-            <span className="absolute bottom-full mb-2 rounded-md bg-fuchsia-500 px-2 py-0.5 text-xs font-semibold whitespace-nowrap text-white tabular-nums">
-              This image: {model.analysisGsd} m
-            </span>
-            <span className="size-5 rounded-full bg-fuchsia-500 ring-4 ring-card" />
-          </motion.div>
-          {[0.1, 1, 10, 100].map((tick) => (
-            <span
-              key={tick}
-              className="absolute top-full mt-2 -translate-x-1/2 text-xs whitespace-nowrap text-muted-foreground tabular-nums"
-              style={{ left: `${gsdPosition(tick)}%` }}
+      <Card>
+        <CardHeader>
+          <CardDescription>
+            Is this image close to what the model was trained on?
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="relative mt-6 mb-8 h-3 rounded-full bg-muted">
+            <div
+              className="absolute inset-y-0 rounded-full bg-foreground/15"
+              style={{
+                left: `${gsdPosition(tolerated[0])}%`,
+                right: `${100 - gsdPosition(tolerated[1])}%`,
+              }}
+            />
+            <div
+              className="absolute inset-y-0 rounded-full bg-foreground/45"
+              style={{
+                left: `${gsdPosition(low)}%`,
+                right: `${100 - gsdPosition(high)}%`,
+              }}
+            />
+            <motion.div
+              className="absolute top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center"
+              initial={{
+                left: reduceMotion
+                  ? `${gsdPosition(model.analysisGsd)}%`
+                  : '98%',
+              }}
+              animate={{ left: `${gsdPosition(model.analysisGsd)}%` }}
+              transition={{ delay: 0.6, duration: 1.6, ease: EASE }}
+              onAnimationComplete={() => setLanded(true)}
             >
-              {tick} m
+              <span className="absolute bottom-full mb-2 rounded-md bg-fuchsia-500 px-2 py-0.5 text-xs font-semibold whitespace-nowrap text-white tabular-nums">
+                This image: {model.analysisGsd} m
+              </span>
+              <span className="size-5 rounded-full bg-fuchsia-500 ring-4 ring-card" />
+            </motion.div>
+            {[0.1, 1, 10, 100].map((tick) => (
+              <span
+                key={tick}
+                className="absolute top-full mt-2 -translate-x-1/2 text-xs whitespace-nowrap text-muted-foreground tabular-nums"
+                style={{ left: `${gsdPosition(tick)}%` }}
+              >
+                {tick} m
+              </span>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <span className="size-2.5 rounded-full bg-foreground/45" />
+              Trained on {low}–{high} m per pixel
             </span>
-          ))}
-        </div>
-        <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1.5">
-            <span className="size-2.5 rounded-full bg-foreground/45" />
-            Trained on {low}–{high} m per pixel
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="size-2.5 rounded-full bg-foreground/15" />
-            Accepted, up to {model.tolerance}× either side
-          </span>
-        </div>
-      </div>
+            <span className="flex items-center gap-1.5">
+              <span className="size-2.5 rounded-full bg-foreground/15" />
+              Accepted, up to {model.tolerance}× either side
+            </span>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   )
 }
@@ -263,7 +281,8 @@ function ChangeStep() {
           </p>
         </div>
         {done && (
-          <Appear className="flex flex-col gap-4 border-t pt-5">
+          <Appear className="flex flex-col gap-4">
+            <Separator />
             <div>
               <p className="font-heading text-4xl font-semibold text-fuchsia-500">
                 {changed}
@@ -330,9 +349,9 @@ function RegionsStep() {
           {regions.map((region, index) => (
             <Appear key={region.number} delay={0.5 + index * 0.45} y={4}>
               <li className="flex items-center gap-2.5 text-sm">
-                <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-foreground text-[11px] font-semibold text-background tabular-nums">
+                <Badge className="size-5 p-0 tabular-nums">
                   {region.number}
-                </span>
+                </Badge>
                 <span className="min-w-0 flex-1 truncate">{region.label}</span>
                 <span className="text-muted-foreground tabular-nums">
                   {regionArea(region.description)}

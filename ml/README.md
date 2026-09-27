@@ -9,7 +9,7 @@ and training scripts run as modules from the repository root
 |---|---|---|
 | `C_VQA/` | Change detection and change-VQA on bi-temporal pairs | [C_VQA/README.md](C_VQA/README.md) |
 | `grounding/` | Text-guided region grounding (GroundingDINO + re-ranker) | [docs/grounding-module-explained.md](../docs/grounding-module-explained.md) |
-| `fusion/` | Optical–SAR dual encoder and terrain classification | — |
+| `fusion/` | Optical–SAR dual encoder and terrain classification. `FusionModel.from_checkpoint` sizes the terrain head from the checkpoint, so 4-class checkpoints (trained before "water" was added) and 5-class ones both load | — |
 | `vqa/` | Single-image VQA and captioning | [vqa/README.md](vqa/README.md) |
 | `controller/` | `SpecialistModel` request/response schema shared with the backend | — |
 | `datasets/` | Dataset loaders (SEN1-2, QXS-SAROPT) | — |

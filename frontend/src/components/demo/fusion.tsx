@@ -11,7 +11,7 @@ import {
   AskStep,
   CheckBadge,
   ConfidenceRow,
-  EASE,
+  FillBar,
   Frame,
   InputsStep,
   MaskLayer,
@@ -23,6 +23,14 @@ import {
 } from '#/components/demo/kit'
 import type { RecordedRun } from '#/components/demo/kit'
 import type { Scenario } from '#/components/demo/scenario'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '#/components/ui/card'
+import { Separator } from '#/components/ui/separator'
 import recorded from './flood-run.json'
 
 const run = recorded as unknown as RecordedRun & {
@@ -94,55 +102,58 @@ function EncodeStep() {
           ))}
         </div>
         <Arrow delay={0.8} />
-        <Appear
-          delay={1}
-          className="rounded-xl bg-card p-5 ring-1 ring-foreground/10"
-        >
-          <p className="flex items-center gap-2 font-heading text-lg font-semibold">
-            <CpuIcon className="size-5" />
-            Dual encoder, fine-tuned
-          </p>
-          <p className="mt-2 text-sm/6 text-muted-foreground">
-            Two {model.backbone} branches, one per sensor, trained so that an
-            optical patch and a radar patch of the same ground land close
-            together. A small head on top names the land type.
-          </p>
+        <Appear delay={1}>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <CpuIcon />
+                Dual encoder, fine-tuned
+              </CardTitle>
+              <CardDescription>
+                Two {model.backbone} branches, one per sensor, trained so that
+                an optical patch and a radar patch of the same ground land close
+                together. A small head on top names the land type.
+              </CardDescription>
+            </CardHeader>
+          </Card>
         </Appear>
         <Arrow delay={1.6} />
-        <Appear
-          delay={1.8}
-          className="rounded-xl bg-card p-5 ring-1 ring-foreground/10"
-        >
-          <p className="text-sm text-muted-foreground">
-            How well the two views agree
-          </p>
-          <motion.p
-            className="font-heading text-5xl font-semibold"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: reduceMotion ? 0 : 2 }}
-          >
-            {similarity.toFixed(2)}
-          </motion.p>
-          <p className="text-xs text-muted-foreground">
-            Cosine similarity of the two embeddings; 1 means they agree
-            completely
-          </p>
+        <Appear delay={1.8}>
+          <Card>
+            <CardHeader>
+              <CardDescription>How well the two views agree</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <motion.p
+                className="font-heading text-5xl font-semibold"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: reduceMotion ? 0 : 2 }}
+              >
+                {similarity.toFixed(2)}
+              </motion.p>
+              <p className="text-xs text-muted-foreground">
+                Cosine similarity of the two embeddings; 1 means they agree
+                completely
+              </p>
+            </CardContent>
+          </Card>
         </Appear>
       </div>
 
-      <Appear
-        delay={2.6}
-        className="flex items-center gap-4 rounded-xl bg-card p-5 ring-1 ring-foreground/10"
-      >
-        <p className="font-heading text-4xl font-semibold">
-          {(model.matching * 100).toFixed(1)}%
-        </p>
-        <p className="text-sm/6 text-muted-foreground">
-          of held-out radar patches matched to their own optical twin during
-          validation: the encoder has learned what the same ground looks like to
-          both sensors.
-        </p>
+      <Appear delay={2.6}>
+        <Card>
+          <CardContent className="flex items-center gap-4">
+            <p className="font-heading text-4xl font-semibold">
+              {(model.matching * 100).toFixed(1)}%
+            </p>
+            <p className="text-sm/6 text-muted-foreground">
+              of held-out radar patches matched to their own optical twin during
+              validation: the encoder has learned what the same ground looks
+              like to both sensors.
+            </p>
+          </CardContent>
+        </Card>
       </Appear>
     </div>
   )
@@ -176,18 +187,13 @@ function TerrainStep() {
               </span>
               <span className="tabular-nums">{pct(value)}</span>
             </div>
-            <div className="mt-1.5 h-2.5 overflow-hidden rounded-full bg-muted">
-              <motion.div
-                className={`h-full rounded-full ${index === 0 ? 'bg-foreground' : 'bg-foreground/35'}`}
-                initial={{ width: 0 }}
-                animate={{ width: `${value * 100}%` }}
-                transition={{
-                  delay: 0.4 + index * 0.25,
-                  duration: 0.8,
-                  ease: EASE,
-                }}
-              />
-            </div>
+            <FillBar
+              value={value * 100}
+              delay={0.4 + index * 0.25}
+              duration={0.8}
+              tone={index === 0 ? 'default' : 'muted'}
+              className="mt-1.5"
+            />
           </div>
         ))}
         <Appear
@@ -264,11 +270,9 @@ function WaterStep() {
                 in the hand-drawn label (Sen1Floods11)
               </p>
             </Appear>
-            <Appear
-              delay={0.4}
-              className="flex items-start gap-2 border-t pt-4 text-sm/6"
-            >
-              <CheckBadge className="mt-0.5" />
+            <Separator />
+            <Appear delay={0.4} className="flex items-start gap-2 text-sm/6">
+              <CheckBadge className="mt-0.5 shrink-0" />
               <span>
                 Across all {model.chips} hand-labelled chips we checked, the
                 radar is {(model.waterError * 100).toFixed(1)} points off on

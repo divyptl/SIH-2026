@@ -3,6 +3,8 @@ import { ChevronsLeftRightIcon } from 'lucide-react'
 
 import { EvidenceOverlay } from '#/components/evidence-overlay'
 import type { EvidenceOverlayProps } from '#/components/evidence-overlay'
+import { Slider } from '#/components/ui/slider'
+import { firstValue } from '#/lib/utils'
 
 interface SwipeImage {
   src: string
@@ -29,8 +31,8 @@ interface ChangeSwipeProps extends Omit<
  * reveals the change. Boxes stay drawn across both halves: the pair shares one
  * footprint, so a box marks the same ground in either image.
  *
- * The divider is a native range input stretched invisibly over the image,
- * which gives drag, click-to-jump, touch and arrow-key control for free.
+ * The divider is a slider stretched invisibly over the image, which gives
+ * drag, click-to-jump, touch and arrow-key control for free.
  */
 export function ChangeSwipe({
   before,
@@ -39,6 +41,7 @@ export function ChangeSwipe({
   ...overlay
 }: ChangeSwipeProps) {
   const [position, setPosition] = React.useState(50)
+  const labelId = React.useId()
 
   return (
     // Always left-to-right: the divider tracks the pointer, not the reading order.
@@ -67,16 +70,19 @@ export function ChangeSwipe({
           </div>
         </div>
       </EvidenceOverlay>
-      <input
-        type="range"
+      <span id={labelId} className="sr-only">
+        {dividerLabel}
+      </span>
+      <Slider
         min={0}
         max={100}
         step={1}
-        value={position}
-        onChange={(event) => setPosition(Number(event.target.value))}
-        aria-label={dividerLabel}
-        aria-valuetext={`${position}%`}
-        className="absolute inset-0 z-20 size-full cursor-ew-resize opacity-0"
+        value={[position]}
+        onValueChange={(value) => setPosition(firstValue(value))}
+        aria-labelledby={labelId}
+        format={{ style: 'unit', unit: 'percent' }}
+        // The control fills the image, so a press anywhere moves the divider.
+        className="absolute inset-0 z-20 h-full cursor-ew-resize opacity-0 *:h-full"
       />
     </div>
   )

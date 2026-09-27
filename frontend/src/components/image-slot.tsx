@@ -113,13 +113,13 @@ export function EmptySlot({
   const { t } = useTranslation()
 
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
       {...dropHandlers}
       onClick={onPick}
       className={cn(
-        'graticule group/slot relative flex aspect-square w-full flex-col items-center justify-center gap-2 rounded-lg p-4 text-center transition-colors',
-        'ring-1 ring-foreground/10 hover:bg-muted/60 focus-visible:ring-3 focus-visible:ring-ring/60 focus-visible:outline-none',
+        'graticule group/slot relative aspect-square h-auto w-full flex-col gap-2 p-4 text-center whitespace-normal ring-1 ring-foreground/10',
         isDragging && 'bg-muted ring-2 ring-foreground/40',
       )}
     >
@@ -132,11 +132,7 @@ export function EmptySlot({
             : 'bg-background text-muted-foreground ring-1 ring-foreground/10',
         )}
       >
-        {primary ? (
-          <ImageUpIcon className="size-4" />
-        ) : (
-          <PlusIcon className="size-4" />
-        )}
+        {primary ? <ImageUpIcon /> : <PlusIcon />}
       </span>
       <span
         className={cn(
@@ -153,6 +149,6 @@ export function EmptySlot({
       <span className="hidden max-w-[15rem] text-xs/relaxed text-muted-foreground sm:block">
         {primary ? t('home.browseHint') : t('home.secondSlotHint')}
       </span>
-    </button>
+    </Button>
   )
 }

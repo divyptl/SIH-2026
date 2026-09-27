@@ -17,7 +17,11 @@ import { fusionScenario } from '#/components/demo/fusion'
 import { groundingScenario } from '#/components/demo/grounding'
 import { formatSeconds } from '#/components/demo/kit'
 import type { Scenario } from '#/components/demo/scenario'
+import { Badge } from '#/components/ui/badge'
 import { Button } from '#/components/ui/button'
+import { Kbd, KbdGroup } from '#/components/ui/kbd'
+import { Progress } from '#/components/ui/progress'
+import { Tabs, TabsList, TabsTrigger } from '#/components/ui/tabs'
 
 export const Route = createFileRoute('/demo')({ component: Demo })
 
@@ -139,6 +143,13 @@ function Demo() {
       )
         return
       const key = event.key
+      // Arrows on a focused walkthrough tab move between the tabs instead.
+      if (
+        key.startsWith('Arrow') &&
+        event.target instanceof Element &&
+        event.target.closest('[role="tablist"]')
+      )
+        return
       if (event.shiftKey && key === 'ArrowRight') {
         go({ scenario: at.scenario + 1, step: 0 })
       } else if (event.shiftKey && key === 'ArrowLeft') {
@@ -173,26 +184,19 @@ function Demo() {
           How SatQuery AI answers a question
         </h1>
 
-        <div
-          role="tablist"
-          aria-label="Walkthroughs"
-          className="grid grid-cols-3 gap-1.5 lg:grid-cols-1"
+        <Tabs
+          value={at.scenario}
+          onValueChange={(index: number) => go({ scenario: index, step: 0 })}
         >
-          {SCENARIOS.map((item, index) => {
-            const selected = index === at.scenario
-            return (
-              <button
+          <TabsList
+            aria-label="Walkthroughs"
+            className="grid h-auto w-full grid-cols-3 gap-1 lg:grid-cols-1"
+          >
+            {SCENARIOS.map((item, index) => (
+              <TabsTrigger
                 key={item.id}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                onClick={() => go({ scenario: index, step: 0 })}
-                className={cn(
-                  'flex items-center gap-3 rounded-lg p-1.5 text-start ring-1 transition-colors focus-visible:ring-3 focus-visible:ring-ring/60 focus-visible:outline-none',
-                  selected
-                    ? 'bg-muted ring-foreground/25'
-                    : 'ring-transparent hover:bg-muted/60',
-                )}
+                value={index}
+                className="h-auto min-w-0 justify-start gap-3 p-1.5 text-start"
               >
                 <img
                   src={item.thumbnail}
@@ -200,17 +204,15 @@ function Demo() {
                   className="hidden size-10 shrink-0 rounded-md object-cover sm:block"
                 />
                 <span className="flex min-w-0 flex-col">
-                  <span className="truncate text-sm font-medium">
-                    {item.input}
-                  </span>
-                  <span className="truncate text-xs text-muted-foreground">
+                  <span className="truncate">{item.input}</span>
+                  <span className="truncate text-xs font-normal text-muted-foreground">
                     {item.model}
                   </span>
                 </span>
-              </button>
-            )
-          })}
-        </div>
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
 
         <p className="text-sm/6 text-muted-foreground">
           A real, recorded run. {scenario.summary}
@@ -226,25 +228,18 @@ function Demo() {
                   : 'next'
             return (
               <li key={item.title} className="shrink-0">
-                <button
-                  type="button"
+                <Button
+                  variant={state === 'now' ? 'secondary' : 'ghost'}
                   onClick={() => go({ scenario: at.scenario, step: position })}
                   aria-current={state === 'now' ? 'step' : undefined}
-                  className={cn(
-                    'flex w-full items-center gap-3 rounded-lg px-2.5 py-1.5 text-start text-sm transition-colors focus-visible:ring-3 focus-visible:ring-ring/60 focus-visible:outline-none',
-                    state === 'now' ? 'bg-muted' : 'hover:bg-muted/60',
-                  )}
+                  className="h-auto w-full justify-start gap-3 px-1.5 py-1.5 text-start font-normal"
                 >
-                  <span
-                    className={cn(
-                      'flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition-colors',
-                      state === 'next'
-                        ? 'text-muted-foreground ring-1 ring-foreground/20'
-                        : 'bg-foreground text-background',
-                    )}
+                  <Badge
+                    variant={state === 'next' ? 'outline' : 'default'}
+                    className="size-6 p-0 tabular-nums"
                   >
                     {position + 1}
-                  </span>
+                  </Badge>
                   <span
                     className={cn(
                       'hidden flex-1 lg:block',
@@ -259,23 +254,29 @@ function Demo() {
                       {formatSeconds(item.took)}
                     </span>
                   )}
-                </button>
+                </Button>
               </li>
             )
           })}
         </ol>
 
         <div className="mt-auto hidden flex-col gap-3 lg:flex">
-          <p className="text-xs/5 text-muted-foreground">
-            Space to pause, arrows or a clicker to step, Shift+arrows to switch
-            walkthrough, R to replay, F for full screen.
+          <p className="text-xs/6 text-muted-foreground">
+            <Kbd>Space</Kbd> to pause, arrows or a clicker to step,{' '}
+            <KbdGroup>
+              <Kbd>Shift</Kbd>+ arrows
+            </KbdGroup>{' '}
+            to switch walkthrough, <Kbd>R</Kbd> to replay, <Kbd>F</Kbd> for full
+            screen.
           </p>
-          <Link
-            to="/"
-            className="text-sm font-medium underline-offset-4 hover:underline"
+          <Button
+            variant="link"
+            nativeButton={false}
+            render={<Link to="/" />}
+            className="w-fit px-0"
           >
             Try it with your own images
-          </Link>
+          </Button>
         </div>
       </aside>
 
@@ -352,22 +353,18 @@ function Demo() {
 
           <div className="flex min-w-0 flex-1 gap-1" aria-hidden>
             {scenario.steps.map((item, position) => (
-              <div
+              <Progress
                 key={item.title}
-                className="h-1 flex-1 overflow-hidden rounded-full bg-muted"
-              >
-                <div
-                  className="h-full bg-foreground"
-                  style={{
-                    width:
-                      position < at.step
-                        ? '100%'
-                        : position > at.step
-                          ? '0%'
-                          : `${Math.min(100, (elapsed / step.duration) * 100)}%`,
-                  }}
-                />
-              </div>
+                value={
+                  position < at.step
+                    ? 100
+                    : position > at.step
+                      ? 0
+                      : Math.min(100, (elapsed / step.duration) * 100)
+                }
+                // Advanced every frame; easing would make it trail the clock.
+                className="flex-1 **:data-[slot=progress-indicator]:transition-none"
+              />
             ))}
           </div>
 

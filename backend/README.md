@@ -1,9 +1,11 @@
 # SatQuery AI — backend
 
-FastAPI service exposing the agentic remote-sensing analysis workflow. Tasks
-with a fine-tuned model from `ml/` (grounding, change VQA, optical–SAR fusion)
-run it in-process; the rest use a general vision-language model through
-[OpenRouter](https://openrouter.ai).
+FastAPI service exposing the agentic remote-sensing analysis workflow. The
+controller picks the task by fixed rules ([Routing](#routing)) and runs the
+fine-tuned model from `ml/` for it in-process (grounding, change VQA,
+optical–SAR fusion). Tasks without one currently return a placeholder answer:
+the general vision-language fallback through [OpenRouter](https://openrouter.ai)
+is switched off in `agent/controller.py` (`_execute_baseline`).
 
 ## Setup
 
@@ -40,8 +42,8 @@ All settings are environment variables, read from `backend/.env`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | *(required)* | Key from openrouter.ai. Without it `/api/analyse` returns 503. |
-| `OPENROUTER_VISION_MODEL` | `google/gemma-4-31b-it:free` | Model that reads the imagery. Must accept `image` input. |
+| `OPENROUTER_API_KEY` | *(required)* | Key from openrouter.ai. Without it `/api/analyse` returns 503, even though only the optional narration calls OpenRouter now. |
+| `OPENROUTER_VISION_MODEL` | `google/gemma-4-31b-it:free` | Vision model for the narration (and the general-VLM fallback, while that is switched off). Must accept `image` input. |
 | `MAX_IMAGE_BYTES` | `20971520` (20 MB) | Per-upload size cap. |
 | `MAX_IMAGE_EDGE_PX` | `1280` | Longest edge before upstream inference. |
 | `OPENROUTER_TIMEOUT_S` | `120` | Upstream request timeout. |
@@ -52,7 +54,7 @@ All settings are environment variables, read from `backend/.env`.
 | `TRANSLATION_BEAMS` / `TRANSLATION_BATCH_SIZE` | `5` / `16` | Beam search width and sentences per batch. |
 | `INDICTRANS_INDIC_EN_MODEL` / `INDICTRANS_EN_INDIC_MODEL` | `ai4bharat/indictrans2-*-dist-200M` | Swap in the 1B checkpoints for higher quality. |
 | `CORS_ORIGINS` | `localhost:3000,127.0.0.1:3000,localhost:5173` | Comma-separated allowed origins. |
-| `SPECIALISTS_ENABLED` | `true` | `false` sends every task to the OpenRouter baseline, for comparison. |
+| `SPECIALISTS_ENABLED` | `true` | `false` sends every task to the baseline, for comparison (currently a placeholder answer). |
 | `GROUNDING_CHECKPOINT` | `checkpoints/grounding/v1/best.pt` | Fine-tuned GroundingDINO. Relative paths resolve against the repository root; empty disables it. |
 | `GROUNDING_RERANKERS` | `auto` | `auto` uses every `reranker*.pt` beside the grounding checkpoint; or a comma-separated list; empty for none. |
 | `CHANGE_VQA_CHECKPOINT` | `checkpoints/c_vqa_best.pt` | Change-VQA model for `change_vqa` and `change_description`. Point it at your latest training run, e.g. `checkpoints/change_detection_v2/best.pt`. |
@@ -211,15 +213,25 @@ scripts/
 The problem statement is explicit that a generic VLM does not satisfy the
 requirements, so every registry entry names the specialist that should own its
 task. A task uses its specialist when the checkpoint configured for it exists;
-otherwise the OpenRouter baseline answers and the response sets
-`trace.domain_adapted: false`. The UI shows which one answered.
+otherwise the baseline answers and the response sets
+`trace.domain_adapted: false`. The UI shows which one answered. The baseline is
+currently a fixed placeholder ("Task … executed via deterministic fallback."),
+not a model.
 
 | Task | Specialist | Default checkpoint |
 |---|---|---|
 | `grounding` | Fine-tuned GroundingDINO + re-ranker ensemble (`ml.grounding`) | `checkpoints/grounding/v1/best.pt` |
 | `change_vqa`, `change_description` | Siamese Change-VQA (`ml.C_VQA`) | `checkpoints/c_vqa_best.pt` |
 | `fusion` | Optical–SAR dual encoder with terrain head (`ml.fusion`) | `checkpoints/fusion_best.pt` |
-| `vqa`, `caption` | — (baseline only) | — |
+| `vqa`, `caption` | — (SkyEyeGPT in `ml/vqa` is not wired in yet) | — |
+
+The fusion loader sizes the terrain head from the checkpoint:
+`fusion_best.pt` has 4 land types (agri, barrenland, grassland, urban), trained
+before "water" was added to `TERRAIN_CLASSES`; a retrained 5-class checkpoint
+loads without code changes. The fusion answer is plain text (no Markdown), and
+its water figures come from two sources: the SAR backscatter mask (within 5.7
+points of the Sen1Floods11 hand labels on 8 chips) and an optical brightness
+proxy for NDWI (no infrared band; 37 points off on average).
 
 Behaviour worth knowing:
 
@@ -246,7 +258,10 @@ The task is chosen by fixed rules in the controller, with no model call:
 | Two dates of one place | — | `change_vqa` |
 | Optical + SAR pair | — | `fusion` |
 
-A client can still name a task explicitly with the `task` form field.
+A client can still name a task explicitly with the `task` form field. The
+trace's classify step records no model and quotes the rule that fired, e.g.
+`Rule-based: one image, and the query asks to locate something ("where"), so
+'grounding'.`
 
 ### Plain-language narration
 

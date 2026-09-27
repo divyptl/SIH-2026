@@ -8,7 +8,7 @@ An agentic, query-driven vision-language assistant for analyzing remote-sensing 
 
 ## What it does
 
-Upload satellite images — a single image, an optical + SAR pair, or two images from different dates — and ask a question in plain English:
+Upload satellite images — a single image, an optical + SAR pair, or two images from different dates — and ask a question in plain English or any of 22 Indian languages (translated with IndicTrans2):
 
 - *"Describe the land-cover and major objects visible in this image."*
 - *"Highlight the water body referred to in the query."*
@@ -16,7 +16,9 @@ Upload satellite images — a single image, an optical + SAR pair, or two images
 - *"Use the optical and SAR images together to identify built-up and water-covered regions."*
 - *"Has the built-up area increased, decreased, or remained unchanged?"*
 
-Instead of routing every query through one generic model, an **agentic controller** interprets the question, validates the inputs, and dispatches it to the right specialist model — then returns an answer backed by visual evidence (bounding boxes, masks, confidence scores) and a full, auditable trace of what it did.
+Instead of routing every query through one generic model, an **agentic controller** validates the inputs, picks the task by fixed rules, and dispatches it to the right fine-tuned specialist model — then returns an answer backed by visual evidence (bounding boxes, masks, confidence scores) and a full, auditable trace of what it did.
+
+A recorded, animated walkthrough of all three specialists is at **`/demo`** in the web app — see [Demo page](#demo-page).
 
 ### Why this matters
 
@@ -31,7 +33,8 @@ Query + Image Input (single / cross-modal / bi-temporal)
               │
               ▼
       Agentic Controller
-   (intent parsing, input validation, task routing)
+ (input validation, rule-based task routing,
+  resolution check, specialist selection)
               │
    ┌──────────┼──────────┬──────────────┐
    ▼          ▼          ▼              ▼
@@ -47,19 +50,43 @@ Captioning              (bi-temporal)   Fusion
 (answer + bbox/mask + confidence + execution trace)
 ```
 
+### Task routing
+
+The task is chosen by plain rules in the controller — no model call, so the
+same input always gets the same task:
+
+| Input | Rule | Task |
+|---|---|---|
+| One image | the question asks *where* something is (or to *find, locate, show, highlight, mark, detect* it) | Grounding |
+| One image | any other question | VQA |
+| Two images of one place, different dates | — | Change-VQA |
+| An optical and a SAR image of one place | — | Optical–SAR fusion |
+
 ### Specialist models
 
-| Task | Approach | Fine-tuned on |
-|---|---|---|
-| Visual Question Answering / Captioning | Pretrained Vision-Language Model (BLIP-2 or a remote-sensing-adapted VLM like RS-LLaVA / GeoChat) | RSVQA, VRSBench |
-| Text-guided Region Grounding | GroundingDINO proposes 10 boxes, a transformer re-ranker picks the described one ([details](docs/grounding-module-explained.md)) | VRSBench grounding subset |
-| Change Detection / Change-VQA | Siamese vision encoder + VLM head; tiled change mask, each changed region named by the model ([details](ml/C_VQA/README.md)) | LEVIR-CD (0.5 m aerial) + Sentinel-2 pairs labelled with Dynamic World (10 m) |
-| Optical–SAR Fusion | CLIP-style dual-encoder, contrastive pretraining | Sentinel-1 & 2 |
+| Task | Approach | Fine-tuned on | Measured |
+|---|---|---|---|
+| Visual Question Answering / Captioning | SkyEyeGPT on the MiniGPT-v2 runtime ([ml/vqa](ml/vqa/README.md)) | RSVQA, VRSBench | Not yet wired into the backend |
+| Text-guided Region Grounding | GroundingDINO proposes 10 boxes, an ensemble of 5 re-rankers picks the described one ([details](docs/grounding-module-explained.md)) | VRSBench | 67.5% Acc@0.5 on 16,146 VRSBench validation expressions (storage tanks: 85.1%) |
+| Change Detection / Change-VQA | Siamese ResNet-34 + question head; tiled change mask, each changed region named by the model ([details](ml/C_VQA/README.md)) | LEVIR-CD (0.5 m aerial) + Sentinel-2 pairs labelled with Dynamic World (10 m) | Answer accuracy 81% (Dynamic World) / 83% (LEVIR); mask F1 0.58 / 0.88 |
+| Optical–SAR Fusion | ResNet-50 dual encoder, contrastive pretraining, terrain-classification head; SAR backscatter water mask | SEN1-2 (Sentinel-1 & 2) | 84.7% SAR→optical matching on validation; SAR water share within 5.7 points of the hand labels on 8 Sen1Floods11 chips |
 
 The controller only sends imagery to a fine-tuned model when its resolution
-(read from the GeoTIFF) is close to what the model was trained on; otherwise a
-general vision-language model answers, and the result says so. Every result is
-labelled "Fine-tuned model" or "General VLM".
+(read from the GeoTIFF) is close to what the model was trained on; outside that
+range the result carries a warning saying why. Every result is labelled
+"Fine-tuned model" or not.
+
+### Current limitations
+
+- **Single-image VQA / captioning** has no specialist yet (SkyEyeGPT is not
+  installed), and the general-VLM fallback is switched off, so a single-image
+  question without a location word gets a placeholder answer. The same happens
+  when imagery fails the resolution check or a specialist errors.
+- **Fusion:** `checkpoints/fusion_best.pt` was trained with 4 land types
+  (agricultural, barren, grassland, urban); the "water" class added in code needs
+  a retrain. The optical-only water figure in fusion answers is a brightness
+  proxy (the images have no infrared band) and over-counts water by 37 points on
+  average; the SAR figure is the reliable one.
 
 ---
 
@@ -77,8 +104,9 @@ labelled "Fine-tuned model" or "General VLM".
 
 ## Tech stack
 
-- **Frontend:** React + Vite + TanStack Router, shadcn/ui; evidence boxes and change masks drawn over server-rendered previews
-- **Backend:** FastAPI, with the fine-tuned models served in-process and an OpenRouter VLM as the baseline
+- **Frontend:** React + Vite + TanStack Router, shadcn/ui, Motion; evidence boxes and change masks drawn over server-rendered previews, a before/after swipe viewer, and the `/demo` walkthrough
+- **Backend:** FastAPI, with the fine-tuned models served in-process and rule-based routing; OpenRouter is only used for the optional plain-language narration (`NARRATION_ENABLED`, off by default)
+- **Translation:** IndicTrans2 (22 Indian languages ⇄ English), in-process
 - **ML:** PyTorch, Hugging Face Transformers, one uv workspace shared with the backend
 - **Report export:** PDF (Typst)
 
@@ -88,6 +116,9 @@ labelled "Fine-tuned model" or "General VLM".
 
 ```
 /frontend              # Web app (upload, viewer, results UI)
+  /src/routes          #   index.tsx (the app), demo.tsx (the /demo walkthrough)
+  /src/components/demo #   one recorded run per specialist + shared animations
+  /public/demo         #   images and masks the demo plays back
 /backend               # FastAPI service, controller, validation, report generation
 /ml
   /datasets            # PyTorch dataset loaders (SEN1-2, BigEarthNet, etc.)
@@ -165,6 +196,37 @@ sar_img, optical_img = dataset[0]  # (1,256,256) and (3,256,256) float32 tensors
 
 ---
 
+## Demo page
+
+`/demo` (linked as **How it works** in the header) is an animated, presenter-ready
+walkthrough of how a question is answered, one per input type. Each plays back a
+**real recorded run** of the pipeline, so it needs no backend, GPU or network
+during a presentation, and every number on screen came from the models.
+
+| Walkthrough | Specialist | Recorded example | Checked against |
+|---|---|---|---|
+| Before and after | Change-VQA | Brahmaputra flood in Assam (Jan vs Jul 2024), asked in Hindi | — (change mask, 8 measured regions, Hindi answer) |
+| One image | Grounding | "Where is a storage tank on the upper left?" — three tanks in one photo | DIOR-RSVG hand-labelled box: 90% overlap (IoU) |
+| Optical + radar | Optical–SAR fusion | Flooded Brahmaputra chip in Assam (Sen1Floods11) | Hand-drawn water map: 47% water vs 48% from the SAR |
+
+Each walkthrough steps through the real pipeline stages — ask (and translate),
+check the images, pick the task, choose the model, run it, answer — with the
+time each stage took in the recording.
+
+**Presenter controls:** autoplay runs through all three walkthroughs; Space
+pauses, ←/→ or a clicker's PageUp/PageDown step, Shift+←/→ switches
+walkthrough, 1–9 jump to a step, R replays a step, F enters or leaves full
+screen.
+
+**Re-recording a walkthrough** (after retraining a model): POST the same inputs to
+`/api/analyse`, save the JSON response next to the walkthrough in
+`frontend/src/components/demo/` (adding the question as `query`), and move the
+preview/mask data URIs to image files in `frontend/public/demo/`. Each
+walkthrough file (`change.tsx`, `grounding.tsx`, `fusion.tsx`) names its inputs
+in its header comment.
+
+---
+
 ## Getting started
 
 ```bash
@@ -185,7 +247,11 @@ pnpm install
 pnpm dev
 ```
 
+Open http://localhost:3000 for the app and http://localhost:3000/demo for the
+walkthrough.
+
 - Backend setup, configuration and the specialist models: [backend/README.md](backend/README.md)
+- Frontend structure and the demo page: [frontend/README.md](frontend/README.md)
 - Training and evaluating the Change-VQA model: [ml/C_VQA/README.md](ml/C_VQA/README.md)
 - Grounding model: [docs/grounding-module-explained.md](docs/grounding-module-explained.md)
 

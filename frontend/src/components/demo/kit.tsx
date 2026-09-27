@@ -16,6 +16,16 @@ import { cn } from 'cn'
 
 import { ViewfinderCorners } from '#/components/viewfinder'
 import { Badge } from '#/components/ui/badge'
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '#/components/ui/card'
+import { Item } from '#/components/ui/item'
+import { Progress } from '#/components/ui/progress'
 import { LANGUAGES } from '#/lib/languages'
 import type { AnalysisResponse, ImageInfo, Task, TraceStep } from '#/lib/api'
 
@@ -141,34 +151,72 @@ export function Chip({
   tone?: 'plain' | 'strong'
 }) {
   return (
-    <motion.span
-      initial={{ opacity: 0, scale: 0.85 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ delay, duration: 0.3, ease: EASE }}
-      className={cn(
-        'inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium tabular-nums',
-        tone === 'strong'
-          ? 'bg-foreground text-background'
-          : 'bg-background/85 text-foreground ring-1 ring-foreground/15 backdrop-blur',
-      )}
+    <Badge
+      variant={tone === 'strong' ? 'default' : 'secondary'}
+      className="tabular-nums"
+      render={
+        <motion.span
+          initial={{ opacity: 0, scale: 0.85 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ delay, duration: 0.3, ease: EASE }}
+        />
+      }
     >
       {children}
-    </motion.span>
+    </Badge>
   )
 }
 
-export function CheckBadge({ className }: { className?: string }) {
+export function CheckBadge({
+  className,
+  variant = 'default',
+}: {
+  className?: string
+  variant?: 'default' | 'secondary'
+}) {
   return (
-    <motion.span
-      initial={{ scale: 0 }}
-      animate={{ scale: 1 }}
+    <Badge
+      variant={variant}
+      className={cn('size-6 p-0', className)}
+      render={<motion.span initial={{ scale: 0 }} animate={{ scale: 1 }} />}
+    >
+      <CheckIcon />
+    </Badge>
+  )
+}
+
+const FILL_TONES = {
+  default: '',
+  muted: '**:data-[slot=progress-indicator]:bg-primary/40',
+  accent: '**:data-[slot=progress-indicator]:bg-fuchsia-500',
+}
+
+/** A bar that fills from empty to `value` (0-100) after `delay` seconds. */
+export function FillBar({
+  value,
+  delay,
+  duration = 0.6,
+  tone = 'default',
+  className,
+}: {
+  value: number
+  delay: number
+  duration?: number
+  tone?: keyof typeof FILL_TONES
+  className?: string
+}) {
+  const filled = useAfter(delay * 1000)
+  return (
+    <Progress
+      aria-hidden
+      value={filled ? value : 0}
       className={cn(
-        'flex size-6 shrink-0 items-center justify-center rounded-full bg-foreground text-background',
+        '**:data-[slot=progress-indicator]:duration-(--fill-duration) **:data-[slot=progress-indicator]:ease-out motion-reduce:**:data-[slot=progress-indicator]:transition-none',
+        FILL_TONES[tone],
         className,
       )}
-    >
-      <CheckIcon className="size-3.5" />
-    </motion.span>
+      style={{ '--fill-duration': `${duration}s` } as React.CSSProperties}
+    />
   )
 }
 
@@ -283,20 +331,22 @@ export function AskStep({ run }: { run: RecordedRun }) {
 
   return (
     <div className="flex h-full flex-col justify-center gap-6">
-      <div className="rounded-2xl bg-card p-6 ring-1 ring-foreground/10">
-        <span className="text-xs text-muted-foreground">
-          {sourceLanguage?.name ?? 'English'}
-        </span>
-        <p
-          lang={translation?.source_language}
-          className="mt-1 min-h-[1.4em] text-3xl font-medium sm:text-4xl"
-        >
-          {typed.text}
-          {!typed.done && (
-            <span className="ms-0.5 inline-block h-[1em] w-0.5 translate-y-1 animate-pulse bg-foreground" />
-          )}
-        </p>
-      </div>
+      <Card>
+        <CardHeader>
+          <CardDescription>{sourceLanguage?.name ?? 'English'}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <p
+            lang={translation?.source_language}
+            className="min-h-[1.4em] text-3xl font-medium sm:text-4xl"
+          >
+            {typed.text}
+            {!typed.done && (
+              <span className="ms-0.5 inline-block h-[1em] w-0.5 translate-y-1 animate-pulse bg-foreground" />
+            )}
+          </p>
+        </CardContent>
+      </Card>
 
       {translated ? (
         <>
@@ -312,16 +362,17 @@ export function AskStep({ run }: { run: RecordedRun }) {
               )}
             </span>
           </Appear>
-          <Appear
-            delay={afterTyping + 0.35}
-            className="rounded-2xl bg-card p-6 ring-1 ring-foreground/10"
-          >
-            <span className="text-xs text-muted-foreground">
-              English, for the models
-            </span>
-            <p className="mt-1 font-heading text-2xl font-medium sm:text-3xl">
-              {translation.english_query}
-            </p>
+          <Appear delay={afterTyping + 0.35}>
+            <Card>
+              <CardHeader>
+                <CardDescription>English, for the models</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <p className="font-heading text-2xl font-medium sm:text-3xl">
+                  {translation.english_query}
+                </p>
+              </CardContent>
+            </Card>
           </Appear>
         </>
       ) : (
@@ -417,14 +468,13 @@ export function InputsStep({
           </motion.div>
         ))}
       </div>
-      <Appear
-        delay={2.4}
-        className="flex items-center gap-3 rounded-xl bg-card px-5 py-4 ring-1 ring-foreground/10"
-      >
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-foreground text-background">
-          <CheckIcon className="size-4" />
-        </span>
-        <p className="text-base">{verdict}</p>
+      <Appear delay={2.4}>
+        <Card>
+          <CardContent className="flex items-center gap-3">
+            <CheckBadge />
+            <p className="text-base">{verdict}</p>
+          </CardContent>
+        </Card>
       </Appear>
     </div>
   )
@@ -464,27 +514,36 @@ export function RouteStep({ run }: { run: RecordedRun }) {
   return (
     <div className="flex h-full flex-col justify-center gap-6">
       {keyword && (
-        <Appear className="rounded-xl bg-card px-5 py-4 text-lg ring-1 ring-foreground/10">
-          <Highlight text={english} word={keyword} />
+        <Appear>
+          <Card>
+            <CardContent className="text-lg">
+              <Highlight text={english} word={keyword} />
+            </CardContent>
+          </Card>
         </Appear>
       )}
       <div className="flex flex-col gap-2.5">
         {ROUTES.map((route, index) => {
           const isChosen = settled && index === chosen
           return (
-            <motion.div
+            <Item
               key={route.task}
-              initial={{ opacity: 0, x: -16 }}
-              animate={{
-                opacity: tick < index ? 0 : settled && !isChosen ? 0.4 : 1,
-                x: tick < index ? -16 : 0,
-              }}
-              transition={{ duration: 0.4, ease: EASE }}
+              variant="outline"
+              render={
+                <motion.div
+                  initial={{ opacity: 0, x: -16 }}
+                  animate={{
+                    opacity: tick < index ? 0 : settled && !isChosen ? 0.4 : 1,
+                    x: tick < index ? -16 : 0,
+                  }}
+                  transition={{ duration: 0.4, ease: EASE }}
+                />
+              }
               className={cn(
-                'grid grid-cols-[minmax(0,1.2fr)_auto_minmax(0,1fr)] items-center gap-4 rounded-xl px-4 py-3.5 ring-1 transition-colors duration-300',
+                'grid grid-cols-[minmax(0,1.2fr)_auto_minmax(0,1fr)] gap-4 px-4 py-3.5 duration-300',
                 isChosen
-                  ? 'bg-foreground text-background ring-foreground'
-                  : 'bg-card ring-foreground/10',
+                  ? 'border-primary bg-primary text-primary-foreground'
+                  : 'bg-card',
               )}
             >
               <span className="font-heading text-base font-semibold sm:text-lg">
@@ -493,27 +552,34 @@ export function RouteStep({ run }: { run: RecordedRun }) {
               <ArrowRightIcon
                 className={cn(
                   'size-5',
-                  isChosen ? 'text-background/70' : 'text-muted-foreground',
+                  isChosen
+                    ? 'text-primary-foreground/70'
+                    : 'text-muted-foreground',
                 )}
               />
               <span className="flex items-center gap-2 text-base">
                 {route.name}
                 {isChosen && (
-                  <CheckBadge className="ms-auto bg-background text-foreground" />
+                  <CheckBadge variant="secondary" className="ms-auto" />
                 )}
               </span>
-            </motion.div>
+            </Item>
           )
         })}
       </div>
       {settled && (
-        <Appear className="flex flex-wrap items-baseline gap-x-6 gap-y-2 rounded-xl bg-card p-5 ring-1 ring-foreground/10">
-          <p className="text-lg/7">
-            Plain rules, no model: the same input always gets the same task.
-          </p>
-          <p className="text-sm text-muted-foreground tabular-nums">
-            Decided in {formatSeconds(traceStep(run, 'classify')?.duration_ms)}
-          </p>
+        <Appear>
+          <Card>
+            <CardContent className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
+              <p className="text-lg/7">
+                Plain rules, no model: the same input always gets the same task.
+              </p>
+              <p className="text-sm text-muted-foreground tabular-nums">
+                Decided in{' '}
+                {formatSeconds(traceStep(run, 'classify')?.duration_ms)}
+              </p>
+            </CardContent>
+          </Card>
         </Appear>
       )}
     </div>
@@ -562,14 +628,12 @@ export function ConfidenceRow({ run }: { run: AnalysisResponse }) {
       </Badge>
       <div className="flex flex-1 items-center gap-2">
         <span className="text-sm text-muted-foreground">Confidence</span>
-        <div className="h-1.5 min-w-16 flex-1 overflow-hidden rounded-full bg-muted">
-          <motion.div
-            className="h-full rounded-full bg-foreground"
-            initial={{ width: 0 }}
-            animate={{ width: `${confidence}%` }}
-            transition={{ delay: 0.9, duration: 1, ease: EASE }}
-          />
-        </div>
+        <FillBar
+          value={confidence}
+          delay={0.9}
+          duration={1}
+          className="min-w-16 flex-1"
+        />
         <span className="text-sm font-semibold tabular-nums">
           {confidence}%
         </span>
@@ -583,47 +647,37 @@ export function StepTimeline({ run }: { run: AnalysisResponse }) {
   const steps = run.trace.steps
   const longest = Math.max(...steps.map((step) => step.duration_ms))
   return (
-    <div className="rounded-xl bg-card p-4 ring-1 ring-foreground/10">
-      <p className="flex items-baseline justify-between text-sm">
-        <span className="font-medium">Every step, as recorded</span>
-        <span className="text-muted-foreground tabular-nums">
+    <Card size="sm">
+      <CardHeader>
+        <CardTitle>Every step, as recorded</CardTitle>
+        <CardAction className="text-muted-foreground tabular-nums">
           {formatSeconds(run.execution_time_ms)} in total
-        </span>
-      </p>
-      <ol className="mt-3 flex flex-col gap-1.5">
-        {steps.map((step, index) => (
-          <li
-            key={index}
-            className="grid grid-cols-[8.5rem_minmax(0,1fr)_3.5rem] items-center gap-3 text-xs"
-          >
-            <span className="truncate">
-              {STAGE_NAMES[step.tool] ?? STAGE_NAMES[step.stage] ?? step.stage}
-            </span>
-            <span className="h-1.5 overflow-hidden rounded-full bg-muted">
-              <motion.span
-                className={cn(
-                  'block h-full rounded-full',
-                  step.stage === 'execute'
-                    ? 'bg-fuchsia-500'
-                    : 'bg-foreground/60',
-                )}
-                initial={{ width: 0 }}
-                animate={{
-                  width: `${Math.max(1.5, (step.duration_ms / longest) * 100)}%`,
-                }}
-                transition={{
-                  delay: 1.1 + index * 0.08,
-                  duration: 0.6,
-                  ease: EASE,
-                }}
+        </CardAction>
+      </CardHeader>
+      <CardContent>
+        <ol className="flex flex-col gap-1.5">
+          {steps.map((step, index) => (
+            <li
+              key={index}
+              className="grid grid-cols-[8.5rem_minmax(0,1fr)_3.5rem] items-center gap-3 text-xs"
+            >
+              <span className="truncate">
+                {STAGE_NAMES[step.tool] ??
+                  STAGE_NAMES[step.stage] ??
+                  step.stage}
+              </span>
+              <FillBar
+                value={Math.max(1.5, (step.duration_ms / longest) * 100)}
+                delay={1.1 + index * 0.08}
+                tone={step.stage === 'execute' ? 'accent' : 'muted'}
               />
-            </span>
-            <span className="text-end text-muted-foreground tabular-nums">
-              {formatSeconds(step.duration_ms)}
-            </span>
-          </li>
-        ))}
-      </ol>
-    </div>
+              <span className="text-end text-muted-foreground tabular-nums">
+                {formatSeconds(step.duration_ms)}
+              </span>
+            </li>
+          ))}
+        </ol>
+      </CardContent>
+    </Card>
   )
 }
