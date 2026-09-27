@@ -190,7 +190,7 @@ function Demo() {
         >
           <TabsList
             aria-label="Walkthroughs"
-            className="grid h-auto w-full grid-cols-3 gap-1 lg:grid-cols-1"
+            className="grid w-full grid-cols-3 gap-1 group-data-horizontal/tabs:h-auto lg:grid-cols-1"
           >
             {SCENARIOS.map((item, index) => (
               <TabsTrigger
@@ -232,7 +232,7 @@ function Demo() {
                   variant={state === 'now' ? 'secondary' : 'ghost'}
                   onClick={() => go({ scenario: at.scenario, step: position })}
                   aria-current={state === 'now' ? 'step' : undefined}
-                  className="h-auto w-full justify-start gap-3 px-1.5 py-1.5 text-start font-normal"
+                  className="h-auto w-full justify-start gap-3 px-1.5 py-1.5 text-start font-normal whitespace-normal"
                 >
                   <Badge
                     variant={state === 'next' ? 'outline' : 'default'}
@@ -242,7 +242,7 @@ function Demo() {
                   </Badge>
                   <span
                     className={cn(
-                      'hidden flex-1 lg:block',
+                      'hidden min-w-0 flex-1 lg:block',
                       state === 'next' && 'text-muted-foreground',
                       state === 'now' && 'font-medium',
                     )}

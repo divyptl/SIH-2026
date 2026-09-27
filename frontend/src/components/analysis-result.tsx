@@ -1,5 +1,6 @@
 import * as React from 'react'
 import {
+  ChevronDownIcon,
   ChevronsLeftRightIcon,
   CircleAlertIcon,
   CloudIcon,
@@ -25,6 +26,11 @@ import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
 import { Badge } from '#/components/ui/badge'
 import { Button } from '#/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '#/components/ui/card'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '#/components/ui/collapsible'
 import { Progress } from '#/components/ui/progress'
 import { Separator } from '#/components/ui/separator'
 import {
@@ -415,83 +421,107 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
             </div>
 
             {result.evidence.length > 0 && (
-              <section className="flex flex-col gap-2">
-                <h3 className="font-heading text-sm font-semibold">
-                  {t('result.evidence', { count: result.evidence.length })}
+              <Collapsible
+                defaultOpen
+                render={<section className="flex flex-col gap-2" />}
+              >
+                <h3>
+                  <CollapsibleTrigger
+                    render={
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="-ms-2.5 font-heading font-semibold"
+                      />
+                    }
+                  >
+                    {t('result.evidence', { count: result.evidence.length })}
+                    <ChevronDownIcon
+                      data-icon="inline-end"
+                      className="transition-transform group-data-panel-open/button:rotate-180 motion-reduce:transition-none"
+                    />
+                  </CollapsibleTrigger>
                 </h3>
-                <Accordion multiple className="-mx-2">
-                  {result.evidence.map((item, index) => {
-                    const isSpatial =
-                      (item.type === 'bbox' || item.type === 'mask') &&
-                      item.data
-                    const label = labelOf(index)
-                    const description = descriptionOf(index)
-                    return (
-                      <AccordionItem
-                        key={index}
-                        value={index}
-                        render={
-                          <motion.div
-                            initial={{ opacity: 0, y: 4 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: 0.04 * index, duration: 0.2 }}
-                          />
-                        }
-                        onMouseEnter={() => setActiveEvidence(index)}
-                        onMouseLeave={() => setActiveEvidence(null)}
-                        className={cn(
-                          'rounded-lg px-2 transition-colors',
-                          activeEvidence === index && 'bg-muted',
-                        )}
-                      >
-                        <AccordionTrigger className="items-center gap-3 text-start">
-                          <span
+                <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-200 ease-out data-ending-style:h-0 data-starting-style:h-0 motion-reduce:transition-none">
+                  <div className="flex flex-col gap-2">
+                    <Accordion multiple className="-mx-2">
+                      {result.evidence.map((item, index) => {
+                        const isSpatial =
+                          (item.type === 'bbox' || item.type === 'mask') &&
+                          item.data
+                        const label = labelOf(index)
+                        const description = descriptionOf(index)
+                        return (
+                          <AccordionItem
+                            key={index}
+                            value={index}
+                            render={
+                              <motion.div
+                                initial={{ opacity: 0, y: 4 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{
+                                  delay: 0.04 * index,
+                                  duration: 0.2,
+                                }}
+                              />
+                            }
+                            onMouseEnter={() => setActiveEvidence(index)}
+                            onMouseLeave={() => setActiveEvidence(null)}
                             className={cn(
-                              'flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums',
-                              item.type === 'mask'
-                                ? 'bg-fuchsia-500 text-white'
-                                : isSpatial
-                                  ? 'bg-foreground text-background'
-                                  : 'text-muted-foreground ring-1 ring-foreground/20',
+                              'rounded-lg px-2 transition-colors',
+                              activeEvidence === index && 'bg-muted',
                             )}
                           >
-                            {index + 1}
-                          </span>
-                          {/* Observations have no label; their description
+                            <AccordionTrigger className="items-center gap-3 text-start">
+                              <span
+                                className={cn(
+                                  'flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums',
+                                  item.type === 'mask'
+                                    ? 'bg-fuchsia-500 text-white'
+                                    : isSpatial
+                                      ? 'bg-foreground text-background'
+                                      : 'text-muted-foreground ring-1 ring-foreground/20',
+                                )}
+                              >
+                                {index + 1}
+                              </span>
+                              {/* Observations have no label; their description
                               stands in, cut to one line until opened. */}
-                          <span
-                            lang={lang.code}
-                            dir={lang.dir}
-                            className={cn(
-                              'min-w-0 flex-1',
-                              label ? 'first-letter:uppercase' : 'truncate',
-                            )}
-                          >
-                            {label ?? description}
-                          </span>
-                          {item.confidence !== null && (
-                            <span className="shrink-0 text-xs font-normal text-muted-foreground tabular-nums">
-                              {Math.round(item.confidence * 100)}%
-                            </span>
-                          )}
-                        </AccordionTrigger>
-                        <AccordionContent
-                          lang={lang.code}
-                          dir={lang.dir}
-                          className="ps-9 text-muted-foreground"
-                        >
-                          {description}
-                        </AccordionContent>
-                      </AccordionItem>
-                    )
-                  })}
-                </Accordion>
-                {observations.length > 0 && previews.length > 0 && (
-                  <p className="text-xs text-muted-foreground">
-                    {t('result.noSpatial', { count: observations.length })}
-                  </p>
-                )}
-              </section>
+                              <span
+                                lang={lang.code}
+                                dir={lang.dir}
+                                className={cn(
+                                  'min-w-0 flex-1',
+                                  label ? 'first-letter:uppercase' : 'truncate',
+                                )}
+                              >
+                                {label ?? description}
+                              </span>
+                              {item.confidence !== null && (
+                                <span className="shrink-0 text-xs font-normal text-muted-foreground tabular-nums">
+                                  {Math.round(item.confidence * 100)}%
+                                </span>
+                              )}
+                            </AccordionTrigger>
+                            <AccordionContent
+                              lang={lang.code}
+                              dir={lang.dir}
+                              className="ps-9 text-muted-foreground"
+                            >
+                              {description}
+                            </AccordionContent>
+                          </AccordionItem>
+                        )
+                      })}
+                    </Accordion>
+                    {observations.length > 0 && previews.length > 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        {t('result.noSpatial', { count: observations.length })}
+                      </p>
+                    )}
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
             )}
           </div>
         </CardContent>
