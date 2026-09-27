@@ -4,14 +4,7 @@ SatQuery-facing wrapper for the VQA / Captioning specialist.
 Implements:
     predict(request: ModelRequest) -> ModelResponse
 
-per ml/controller/schema.py's SpecialistModel protocol (Section 5 of the
-project spec). This interface must not be changed.
-
-Also provides a CLI so the module can be exercised without the
-frontend/backend/controller existing yet:
-
-    python -m ml.vqa.inference --image sample.jpg --query "What type of land cover is visible?"
-    python -m ml.vqa.inference --image sample.jpg --task captioning
+per ml/controller/schema.py's SpecialistModel protocol.
 """
 from __future__ import annotations
 
@@ -22,22 +15,14 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional
 
+import torch
+
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Schema: prefer the REAL project schema at ml/controller/schema.py. Fall
-# back to a local copy only so this module is importable/testable
-# standalone. If both definitions exist in the repo, ml/controller/schema.py
-# is the source of truth — do not let this fallback drift from it.
-# ---------------------------------------------------------------------------
 try:
     from ..controller.schema import ModelRequest, ModelResponse  # type: ignore
-except Exception:  # pragma: no cover - fallback only, exercised in isolated testing
-    logger.warning(
-        "Could not import ml.controller.schema; using a local fallback "
-        "definition for ModelRequest/ModelResponse. Replace with the real "
-        "import once ml/controller/schema.py is available on the path."
-    )
+except Exception:  # pragma: no cover
+    logger.warning("Could not import schema; using local fallback.")
 
     @dataclass
     class ModelRequest:  # type: ignore
@@ -55,86 +40,96 @@ except Exception:  # pragma: no cover - fallback only, exercised in isolated tes
         execution_time_ms: float
 
 from .config import VQAConfig, DEFAULT_CONFIG, SUPPORTED_MODALITIES
-from .model import BaseVQAModel, SkyEyeGPTModel
+from .model import VQAModel as CoreVQAModel
 from .preprocessing import (
     load_image,
     UnsupportedFormatError,
     ImageReadError,
     UnsupportedBandCountError,
 )
-from .confidence import compute_confidence
+from torchvision import transforms
 
 
 class VQARequestError(ValueError):
-    """Malformed/unsupported ModelRequest content, caught inside predict()."""
+    """Malformed/unsupported ModelRequest content."""
 
 
 class VQAModel:
     """
     SatQuery specialist model for single-image VQA + captioning.
 
-    Wraps a BaseVQAModel backend (SkyEyeGPT by default) behind the
-    ModelRequest -> ModelResponse interface expected by the controller.
-    The backend is constructed lazily so importing this module (e.g. for
-    unit tests with a fake backend) never requires a GPU or checkpoint.
+    Wraps the PyTorch VQAModel backend behind the ModelRequest -> ModelResponse
+    interface expected by the controller.
     """
 
-    def __init__(self, backend: Optional[BaseVQAModel] = None, config: VQAConfig = DEFAULT_CONFIG):
+    def __init__(self, backend: Optional[CoreVQAModel] = None, config: VQAConfig = DEFAULT_CONFIG):
         self.config = config
         self._backend = backend
+        self.transform = transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
 
     @property
-    def backend(self) -> BaseVQAModel:
+    def backend(self) -> CoreVQAModel:
         if self._backend is None:
-            self._backend = SkyEyeGPTModel(self.config)
+            if self.config.checkpoint_path and self.config.checkpoint_path.exists():
+                self._backend = CoreVQAModel.from_checkpoint(str(self.config.checkpoint_path), device=self.config.device)
+            else:
+                logger.warning(f"No checkpoint found at {self.config.checkpoint_path}. Using uninitialized weights.")
+                self._backend = CoreVQAModel()
+                self._backend.to(self.config.device)
+                self._backend.eval()
         return self._backend
 
-    # ------------------------------------------------------------------
     def _validate(self, request: ModelRequest) -> None:
         if not request.images:
-            raise VQARequestError(
-                "No image supplied. This module requires exactly one image."
-            )
+            raise VQARequestError("No image supplied. Exactly one image required.")
         if len(request.images) > 1:
-            raise VQARequestError(
-                "Multiple images supplied. Single-image VQA/captioning accepts "
-                "exactly one image; multi-temporal questions belong to the "
-                "Change-VQA specialist (ml/C_VQA), not this module."
-            )
+            raise VQARequestError("Multiple images supplied. Single-image VQA accepts exactly one.")
         if request.modalities:
             unknown = set(request.modalities) - SUPPORTED_MODALITIES
             if unknown:
-                raise VQARequestError(f"Unsupported modality/modalities: {sorted(unknown)}")
-        task = self._resolve_task(request)
-        if task == "vqa" and not (request.query and request.query.strip()):
-            raise VQARequestError("Empty query for a VQA request.")
+                raise VQARequestError(f"Unsupported modalities: {sorted(unknown)}")
 
     def _resolve_task(self, request: ModelRequest) -> str:
         if request.task_hint in ("vqa", "captioning"):
             return request.task_hint
-        # No hint from the controller: infer a sensible default.
         return "vqa" if request.query and request.query.strip() else "captioning"
 
-    # ------------------------------------------------------------------
     def predict(self, request: ModelRequest) -> ModelResponse:
         start = time.perf_counter()
         try:
             self._validate(request)
-
             modality = request.modalities[0] if request.modalities else "optical"
             image_path = request.images[0]
-            image = load_image(image_path, modality=modality)
+            
+            # Load and transform image
+            img = load_image(image_path, modality=modality)
+            if hasattr(img, "astype"):
+                import numpy as np
+                if img.dtype != np.uint8:
+                    img = (img * 255).astype(np.uint8)
+                from PIL import Image
+                img = Image.fromarray(img)
+            else:
+                img = img.convert("RGB")
+            
+            img_tensor = self.transform(img).unsqueeze(0).to(self.config.device)
 
             task = self._resolve_task(request)
-            if task == "captioning":
-                answer = self.backend.caption(image)
-                model_name = "SkyEyeGPT-Captioning"
-            else:
-                answer = self.backend.answer(image, request.query)
-                model_name = "SkyEyeGPT-VQA"
+            query_str = request.query if task == "vqa" else "Describe this image."
 
-            score = self.backend.generation_score()
-            confidence = compute_confidence(answer, score)
+            with torch.no_grad():
+                outputs = self.backend(
+                    image=img_tensor,
+                    question_text=query_str
+                )
+            
+            answer = outputs["predicted_answer_text"][0]
+            confidence = outputs["answer_confidence"][0].item()
+            model_name = "SatQuery-VQA-Custom"
 
         except (
             VQARequestError,
@@ -148,7 +143,7 @@ class VQAModel:
                 answer=f"ERROR: {exc}",
                 confidence=0.0,
                 evidence=[],
-                model_name="SkyEyeGPT-VQA",
+                model_name="SatQuery-VQA-Custom",
                 execution_time_ms=elapsed_ms,
             )
 
@@ -162,17 +157,11 @@ class VQAModel:
         )
 
 
-# ---------------------------------------------------------------------------
-# CLI: python -m ml.vqa.inference --image sample.jpg --query "..."
-# ---------------------------------------------------------------------------
 def _build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="SatQuery VQA/Captioning CLI (standalone test harness)")
+    p = argparse.ArgumentParser(description="SatQuery VQA CLI (standalone test harness)")
     p.add_argument("--image", required=True, help="Path to the RS image (jpg/png/tif/tiff)")
-    p.add_argument("--query", default="", help="Natural-language question (VQA mode)")
-    p.add_argument(
-        "--task", choices=["vqa", "captioning"], default=None,
-        help="Force a task; default infers from --query",
-    )
+    p.add_argument("--query", default="", help="Natural-language question")
+    p.add_argument("--task", choices=["vqa", "captioning"], default=None)
     p.add_argument("--modality", choices=sorted(SUPPORTED_MODALITIES), default="optical")
     return p
 

@@ -1,91 +1,97 @@
 """
-Configuration for the SatQuery VQA / Captioning module (ml/vqa).
+Configuration for the single-image VQA / Captioning specialist model.
 
-Centralizes every path and hyperparameter needed to load MiniGPT-v2 +
-the SkyEyeGPT checkpoint, and to run inference.
-
-IMPORTANT — API STABILITY:
-    The MiniGPT-v2 config keys referenced here mirror the structure of
-    the official Vision-CAIR/MiniGPT-4 repo's `eval_configs/minigptv2_eval.yaml`
-    at the time this was written. If the upstream repo has changed,
-    re-check https://github.com/Vision-CAIR/MiniGPT-4 and update
-    accordingly rather than assuming this is still correct.
+All architectural and training hyperparameters are centralized here for
+reproducibility, ease of hyperparameter sweeps, and clean separation of concerns.
 """
+
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-# Root of this vqa module (ml/vqa/)
-MODULE_DIR = Path(__file__).resolve().parent
 
-# ---------------------------------------------------------------------------
-# Checkpoints — NEVER commit these. See .gitignore note in README.
-# ---------------------------------------------------------------------------
-CHECKPOINTS_DIR = Path(
-    os.environ.get("SATQUERY_CHECKPOINTS_DIR", MODULE_DIR.parent.parent / "checkpoints")
-)
-SKYEYEGPT_CHECKPOINT = CHECKPOINTS_DIR / "SkyEyeGPT.pth"
+@dataclass
+class ModelConfig:
+    """Architecture hyperparameters for Vision Encoder + VLM Head."""
 
-# MiniGPT-v2 is a separate cloned repo (not a pip package). It needs its own
-# base LLM weights + an eval config YAML. These are environment-specific,
-# so they're read from env vars with fallbacks a setup script should fill in.
-MINIGPT_REPO_DIR = Path(
-    os.environ.get("MINIGPT_REPO_DIR", MODULE_DIR.parent.parent / "third_party" / "MiniGPT-4")
-)
-MINIGPT_EVAL_CONFIG = Path(
-    os.environ.get("MINIGPT_EVAL_CONFIG", MINIGPT_REPO_DIR / "eval_configs" / "minigptv2_eval.yaml")
-)
+    # Vision backbone
+    backbone: str = "convnext_tiny"     # convnext_tiny | resnet18 | resnet34 | resnet50
+    pretrained: bool = True             # ImageNet pretrained backbone
+    in_channels: int = 3                # Number of channels (3 for RGB optical)
 
-# ---------------------------------------------------------------------------
-# Runtime
-# ---------------------------------------------------------------------------
-DEVICE = os.environ.get("SATQUERY_DEVICE", "cuda:0")
-DTYPE = os.environ.get("SATQUERY_DTYPE", "fp16")  # "fp16" | "bf16" | "fp32"
+    # Feature dimensions
+    visual_feature_dim: int = 256       # Projected visual feature dimension per token
+    spatial_token_resolution: int = 7   # Spatial grid resolution (7x7 = 49 visual tokens)
+
+    # Text encoder & VLM cross-modal fusion
+    vocab_size: int = 2000              # Max vocabulary size for question/answer tokenizer
+    max_question_length: int = 32       # Max token length for query questions
+    text_embed_dim: int = 256           # Text token embedding dimension
+    num_cross_attention_heads: int = 8  # Number of attention heads in VLM fusion
+    cross_attention_layers: int = 2     # Number of cross-modal transformer layers
+    feedforward_dim: int = 512          # Dimension of feedforward network in VLM
+    dropout: float = 0.1                # Dropout probability
+
+    # Answer classification
+    num_classes: int = 64               # Number of canonical answer categories
+    answer_hidden_dim: int = 256        # Hidden layer in VQA classification head
 
 
 @dataclass
-class GenerationConfig:
-    max_new_tokens: int = 300
-    num_beams: int = 1
-    temperature: float = 1.0
-    do_sample: bool = False
-    repetition_penalty: float = 1.05
+class TrainConfig:
+    """Training hyperparameters for VQA."""
 
+    # Data
+    data_root: str = "data/rsvqa-lr"
+    split_train: str = "train"
+    split_val: str = "val"
+    num_workers: int = 2
+    pin_memory: bool = True
 
-# ---------------------------------------------------------------------------
-# Prompts
-# ---------------------------------------------------------------------------
-CAPTION_INSTRUCTION = (
-    "Describe the remote sensing image in detail. Mention the major "
-    "land-cover types, objects, structures, roads, water bodies and "
-    "vegetation that are visually supported by the image. "
-    "Do not invent information that is not visible."
-)
+    # Image preprocessing
+    image_size: int = 256               # Input image resolution (H=W=256)
+    augment: bool = True                # Enable data augmentations
 
-# ---------------------------------------------------------------------------
-# Supported inputs
-# ---------------------------------------------------------------------------
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-SUPPORTED_MODALITIES = {"optical", "sar", "multispectral"}
+    # Optimization
+    batch_size: int = 16
+    epochs: int = 30
+    lr: float = 1e-4
+    backbone_lr: float = 2e-5           # Lower learning rate for pretrained backbone
+    weight_decay: float = 1e-4
+    warmup_epochs: int = 3
+    min_lr: float = 1e-6
 
-# Documented band mapping used for multispectral -> RGB visualization.
-# Sentinel-2-style band ordering assumed (Red=4, Green=3, Blue=2 in native
-# Sentinel-2 numbering; here expressed as 1-indexed positions into whatever
-# band stack is actually read). MUST be documented wherever it's used —
-# see preprocessing.normalize_image().
-DEFAULT_MULTISPECTRAL_RGB_BANDS = (3, 2, 1)  # (Red, Green, Blue) 1-indexed band positions
+    # Multi-task loss weights
+    vqa_loss_weight: float = 1.0        # Cross-entropy loss weight for VQA answers
 
+    # Checkpointing
+    checkpoint_dir: str = "checkpoints/vqa"
+    save_every: int = 5                 # Save checkpoint every N epochs
+    resume_from: str | None = None      # Path to checkpoint to resume from
 
-@dataclass
-class VQAConfig:
-    device: str = DEVICE
-    dtype: str = DTYPE
-    checkpoint_path: Path = SKYEYEGPT_CHECKPOINT
-    minigpt_eval_config: Path = MINIGPT_EVAL_CONFIG
-    generation: GenerationConfig = field(default_factory=GenerationConfig)
-    multispectral_rgb_bands: tuple = DEFAULT_MULTISPECTRAL_RGB_BANDS
+    # Logging & Evaluation
+    log_every: int = 10                 # Print metrics every N steps
+    eval_every: int = 1                 # Evaluate on val set every N epochs
 
+    # Device
+    device: str = "auto"                # auto | cuda | cpu
+    use_amp: bool = True                # Mixed-precision training
 
-DEFAULT_CONFIG = VQAConfig()
+    @property
+    def checkpoint_path(self) -> Path:
+        return Path(self.checkpoint_dir)
+
+    def resolve_device(self) -> str:
+        """Determine the actual torch device to use."""
+        if self.device == "auto":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    return "cuda"
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    return "mps"
+            except ImportError:
+                pass
+            return "cpu"
+        return self.device

@@ -87,8 +87,14 @@ def run_eval(
     split: str,
     task: str = "vqa",
     limit: Optional[int] = None,
+    checkpoint: Optional[str] = None,
 ) -> dict:
-    model = VQAModel()
+    from ml.vqa.config import VQAConfig
+    config = VQAConfig()
+    if checkpoint:
+        config.checkpoint_path = Path(checkpoint)
+    
+    model = VQAModel(config=config)
     total = 0
     correct = 0
     records = []
@@ -148,6 +154,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--split", default="test")
     p.add_argument("--data-root", required=True, type=Path)
     p.add_argument("--task", default="vqa", choices=["vqa", "captioning"])
+    p.add_argument("--checkpoint", type=str, default=None, help="Path to custom VQA checkpoint")
     p.add_argument(
         "--limit", type=int, default=None,
         help="Evaluate only the first N examples (smoke test before a full run)",
@@ -159,7 +166,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO)
     args = _build_arg_parser().parse_args(argv)
-    results = run_eval(args.dataset, args.data_root, args.split, task=args.task, limit=args.limit)
+    results = run_eval(
+        args.dataset, args.data_root, args.split, 
+        task=args.task, limit=args.limit, checkpoint=args.checkpoint
+    )
     write_report(results, args.out)
     logger.info("Wrote evaluation report to %s", args.out)
     return 0

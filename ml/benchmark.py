@@ -82,6 +82,14 @@ FUSION_SOTA: list[dict[str, Any]] = [
 ]
 
 
+VQA_SOTA: list[dict[str, Any]] = [
+    # General VQA (Accuracy)
+    {"model": "RSVQA (Original)", "dataset": "RSVQA-LR", "accuracy": 79.2, "source": "Lobry et al. 2020"},
+    {"model": "GeoChat",          "dataset": "RSVQA-LR", "accuracy": 88.5, "source": "Li et al. 2024"},
+    {"model": "RS-LLaVA",         "dataset": "RSVQA-LR", "accuracy": 89.1, "source": "Bazi et al. 2024"},
+    {"model": "SkyEyeGPT (v2)",   "dataset": "RSVQA-LR", "accuracy": 87.3, "source": "Zhan et al. 2024"},
+]
+
 # ════════════════════════════════════════════════════════════════════════════
 # Helper: pretty-print a table to stdout and return markdown
 # ════════════════════════════════════════════════════════════════════════════
@@ -129,11 +137,82 @@ def print_table(title: str, headers: list[str], rows: list[list[str]],
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# 0. VQA benchmark
+# ════════════════════════════════════════════════════════════════════════════
+
+def benchmark_vqa(dataset: str, data_root: str, split: str, skip_eval: bool,
+                  max_samples: int | None, checkpoint: str | None = None) -> dict[str, Any]:
+    our_results: dict[str, Any] = {}
+
+    if not skip_eval:
+        data_path = Path(data_root)
+        if (data_path / f"{split}.jsonl").is_file():
+            print(f"\n[VQA] Evaluating {dataset} {split} split ...")
+            from ml.vqa.evaluate import run_eval
+            try:
+                # IMPORTANT: This currently uses `run_eval` from `ml.vqa.evaluate`
+                # Make sure ml.vqa.evaluate is updated to load your custom checkpoint 
+                # rather than defaulting to the old SkyEyeGPT wrapper!
+                results = run_eval(dataset, data_path, split, task="vqa", limit=max_samples, checkpoint=checkpoint)
+                our_results = {
+                    "accuracy": round(results.get("accuracy_exact_match", 0) * 100, 2),
+                    "dataset": dataset,
+                }
+                print(f"  VQA Accuracy (Exact Match): {_fmt(our_results['accuracy'])}")
+            except Exception as e:
+                print(f"  [VQA] Evaluation failed: {e}")
+        else:
+            print(f"\n[VQA] Manifest not found: {data_path / f'{split}.jsonl'} — skipping live eval")
+    else:
+        print("\n[VQA] Skipping live eval (--skip-eval)")
+
+    return our_results
+
+
+def vqa_comparison_table(our: dict[str, Any]) -> str:
+    headers = ["Model", "Dataset", "Accuracy (Exact)"]
+    rows = []
+    for entry in VQA_SOTA:
+        rows.append([
+            entry["model"], entry["dataset"],
+            _fmt(entry["accuracy"]),
+        ])
+    highlight = None
+    if our:
+        highlight = len(rows)
+        rows.append([
+            "SatQuery VQA (Ours)", our.get("dataset", "RSVQA-LR"),
+            _fmt(our.get("accuracy")),
+        ])
+    return print_table("Visual Question Answering — Comparison with SOTA", headers, rows, highlight)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # 1. GROUNDING benchmark
 # ════════════════════════════════════════════════════════════════════════════
 
+def _discover_rerankers(checkpoint: str, explicit: list[str] | None) -> list[str]:
+    """Find reranker checkpoints beside the grounding checkpoint.
+
+    Mirrors the backend's auto-discovery: when no explicit paths are given,
+    glob for ``reranker*.pt`` in the same directory as ``best.pt``.
+    """
+    if explicit is not None:
+        return explicit
+    parent = Path(checkpoint).parent
+    found = sorted(parent.glob("reranker*.pt"))
+    return [str(p) for p in found]
+
+
 def benchmark_grounding(checkpoint: str, skip_eval: bool, device: str,
-                        max_samples: int | None) -> dict[str, Any]:
+                        max_samples: int | None,
+                        reranker_paths: list[str] | None = None) -> dict[str, Any]:
+    """Evaluate grounding with optional reranker.
+
+    Returns a dict whose ``"raw"`` key holds GroundingDINO-only numbers and
+    ``"reranked"`` (when rerankers are available) holds the two-stage numbers.
+    The top-level ``acc@0.5`` etc. are whichever is best.
+    """
     our_results: dict[str, Any] = {}
 
     if not skip_eval and Path(checkpoint).is_file():
@@ -141,6 +220,7 @@ def benchmark_grounding(checkpoint: str, skip_eval: bool, device: str,
         from ml.grounding.evaluate import load_model, predict, summarize, print_summary
         from ml.grounding.config import TrainConfig
         from ml.grounding.dataset import VRSBenchGroundingDataset
+        from ml.grounding.rerank import load_reranker_ensemble
         from ml.grounding.train import resolve_amp
         import torch
 
@@ -160,18 +240,44 @@ def benchmark_grounding(checkpoint: str, skip_eval: bool, device: str,
 
         grounding, model_name = load_model(checkpoint)
         grounding.model.to(dev)
-        records = predict(grounding, dataset, dev, batch_size=8,
-                          num_workers=0, image_size=image_size, amp_dtype=amp_dtype)
-        summary = summarize(records)
-        print_summary(summary, model_name)
 
-        overall = summary["overall"]["all"]
-        our_results = {
-            "acc@0.5": round(overall["acc@0.5"] * 100, 2),
-            "acc@0.7": round(overall["acc@0.7"] * 100, 2),
-            "mIoU":    round(overall["mean_iou"] * 100, 2),
-            "count":   overall["count"],
+        # ── Stage 1: raw GroundingDINO top-1 ────────────────────────────
+        records_raw = predict(grounding, dataset, dev, batch_size=8,
+                              num_workers=0, image_size=image_size, amp_dtype=amp_dtype)
+        summary_raw = summarize(records_raw)
+        print_summary(summary_raw, model_name)
+        raw = summary_raw["overall"]["all"]
+        raw_metrics = {
+            "acc@0.5": round(raw["acc@0.5"] * 100, 2),
+            "acc@0.7": round(raw["acc@0.7"] * 100, 2),
+            "mIoU":    round(raw["mean_iou"] * 100, 2),
+            "count":   raw["count"],
         }
+        our_results = {**raw_metrics, "raw": raw_metrics}
+
+        # ── Stage 2: with reranker(s) ───────────────────────────────────
+        reranker_files = _discover_rerankers(checkpoint, reranker_paths)
+        if reranker_files:
+            print(f"\n[Grounding] Re-ranking with {len(reranker_files)} reranker(s): "
+                  f"{[Path(p).name for p in reranker_files]}")
+            reranker = load_reranker_ensemble(reranker_files, dev)
+            reranked_name = f"{model_name} + {len(reranker.models)} reranker(s)"
+
+            records_reranked = predict(grounding, dataset, dev, batch_size=8,
+                                       num_workers=0, image_size=image_size,
+                                       amp_dtype=amp_dtype, reranker=reranker)
+            summary_reranked = summarize(records_reranked)
+            print_summary(summary_reranked, reranked_name)
+            rr = summary_reranked["overall"]["all"]
+            reranked_metrics = {
+                "acc@0.5": round(rr["acc@0.5"] * 100, 2),
+                "acc@0.7": round(rr["acc@0.7"] * 100, 2),
+                "mIoU":    round(rr["mean_iou"] * 100, 2),
+                "count":   rr["count"],
+            }
+            our_results = {**reranked_metrics, "raw": raw_metrics, "reranked": reranked_metrics}
+        else:
+            print("\n[Grounding] No reranker*.pt found beside checkpoint — reporting raw only")
     elif not Path(checkpoint).is_file():
         print(f"\n[Grounding] Checkpoint not found: {checkpoint} — skipping live eval")
     else:
@@ -190,11 +296,26 @@ def grounding_comparison_table(our: dict[str, Any]) -> str:
         ])
     highlight = None
     if our:
-        highlight = len(rows)
-        rows.append([
-            "SatQuery (Ours)", "VRSBench",
-            _fmt(our.get("acc@0.5")), _fmt(our.get("acc@0.7")), _fmt(our.get("mIoU")),
-        ])
+        # Show raw GroundingDINO numbers if reranker results are available too
+        raw = our.get("raw")
+        reranked = our.get("reranked")
+        if raw and reranked:
+            rows.append([
+                "SatQuery — GDino only", "VRSBench",
+                _fmt(raw.get("acc@0.5")), _fmt(raw.get("acc@0.7")), _fmt(raw.get("mIoU")),
+            ])
+            highlight = len(rows)
+            rows.append([
+                "SatQuery + Reranker (Ours)", "VRSBench",
+                _fmt(reranked.get("acc@0.5")), _fmt(reranked.get("acc@0.7")),
+                _fmt(reranked.get("mIoU")),
+            ])
+        else:
+            highlight = len(rows)
+            rows.append([
+                "SatQuery (Ours)", "VRSBench",
+                _fmt(our.get("acc@0.5")), _fmt(our.get("acc@0.7")), _fmt(our.get("mIoU")),
+            ])
     return print_table("Visual Grounding — Comparison with SOTA", headers, rows, highlight)
 
 
@@ -390,7 +511,7 @@ def main() -> None:
         description="SatQuery AI — Unified Benchmark: evaluate specialists & compare with SOTA"
     )
     parser.add_argument("--models", nargs="+",
-                        choices=["grounding", "change_vqa", "fusion"],
+                        choices=["vqa", "grounding", "change_vqa", "fusion"],
                         default=["grounding", "change_vqa", "fusion"],
                         help="Which specialists to benchmark")
     parser.add_argument("--skip-eval", action="store_true",
@@ -399,7 +520,15 @@ def main() -> None:
                         help="Device for inference (auto / cuda / cpu)")
 
     # Checkpoint paths
+    parser.add_argument("--vqa-ckpt", default="checkpoints/vqa/best.pt")
+    parser.add_argument("--vqa-dataset", default="rsvqa-lr")
+    parser.add_argument("--vqa-data", default="data/rsvqa-lr")
+    parser.add_argument("--vqa-split", default="test")
     parser.add_argument("--grounding-ckpt", default="checkpoints/grounding/v1/best.pt")
+    parser.add_argument("--grounding-reranker", nargs="*", default=None,
+                        help="Reranker .pt file(s); 'auto' (default when omitted) "
+                             "globs reranker*.pt beside --grounding-ckpt. "
+                             "Pass an empty list to disable reranking.")
     parser.add_argument("--change-vqa-ckpt", default="checkpoints/change_detection/latest.pt")
     parser.add_argument("--change-vqa-data", default="data/change_vqa")
     parser.add_argument("--fusion-ckpt", default="checkpoints/fusion/best.pt")
@@ -424,10 +553,20 @@ def main() -> None:
     # ── Training summary ─────────────────────────────────────────────────
     md_sections.append(training_summary_table())
 
+    # ── VQA ──────────────────────────────────────────────────────────────
+    if "vqa" in args.models:
+        vqa_res = benchmark_vqa(
+            args.vqa_dataset, args.vqa_data, args.vqa_split, args.skip_eval, args.max_samples,
+            checkpoint=args.vqa_ckpt
+        )
+        all_results["vqa"] = vqa_res
+        md_sections.append(vqa_comparison_table(vqa_res))
+
     # ── Grounding ────────────────────────────────────────────────────────
     if "grounding" in args.models:
         grounding_res = benchmark_grounding(
-            args.grounding_ckpt, args.skip_eval, args.device, args.max_samples
+            args.grounding_ckpt, args.skip_eval, args.device, args.max_samples,
+            reranker_paths=args.grounding_reranker,
         )
         all_results["grounding"] = grounding_res
         md_sections.append(grounding_comparison_table(grounding_res))

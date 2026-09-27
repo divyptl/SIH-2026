@@ -1,39 +1,112 @@
 """
-STUB — do not use until Phase 4 (small RS domain adaptation) begins.
+PyTorch Dataset for VQA.
 
-Will load a small, documented subset of BigEarthNet.txt / VRSBench /
-RSVQA / SkyEye-968k image-question-answer triples for LoRA fine-tuning
-(Section 34-36). Reuses ml.vqa.preprocessing.load_image so training and
-inference see images through the identical pipeline.
-
-Intentionally unimplemented beyond the interface: fill this in only
-after Phases 1-3 (baseline inference + evaluation) are done and a
-concrete adaptation dataset subset has been selected.
+Loads image-question-answer triples from a flattened JSONL manifest.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import List, NamedTuple
+from typing import Any, Dict
 
-from ..preprocessing import load_image
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
+from PIL import Image
+
+from ml.vqa.config import TrainConfig
+from ml.vqa.model import SimpleTokenizer, CANONICAL_ANSWERS
+from ml.vqa.preprocessing import load_image
 
 
-class TrainExample(NamedTuple):
-    image_path: str
-    question: str
-    answer: str
-    modality: str = "optical"
-
-
-def load_training_subset(manifest_path: Path) -> List[TrainExample]:
+class VQADataset(Dataset):
     """
-    TODO (Phase 4): implement once a concrete small subset (e.g. a few
-    thousand BigEarthNet.txt / VRSBench samples) has been selected and
-    flattened into a manifest (see evaluate.iter_dataset for the same
-    JSONL convention used on the eval side).
+    Dataset for single-image VQA.
+
+    Expects a JSONL manifest at `{data_root}/{split}.jsonl` where each line is:
+    {"image": "path/to/img.jpg", "question": "What is this?", "answer": "road", "modality": "optical"}
     """
-    raise NotImplementedError(
-        "Training dataset loading is a Phase 4 stub. Implement this only "
-        "after baseline SkyEyeGPT inference (Phases 1-3) is working and "
-        "evaluated on RSVQA/VRSBench."
-    )
+
+    def __init__(self, data_root: str | Path, split: str, config: TrainConfig | None = None) -> None:
+        super().__init__()
+        self.data_root = Path(data_root)
+        self.split = split
+        self.config = config or TrainConfig()
+
+        manifest = self.data_root / f"{split}.jsonl"
+        if not manifest.exists():
+            raise FileNotFoundError(f"Manifest not found: {manifest}")
+
+        self.samples = []
+        with manifest.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                self.samples.append(json.loads(line))
+
+        self.tokenizer = SimpleTokenizer()
+
+        # Build answer vocabulary mapping
+        self.answer_to_idx = {ans: i for i, ans in enumerate(CANONICAL_ANSWERS)}
+
+        # Image transforms
+        if self.split == "train" and self.config.augment:
+            self.transform = transforms.Compose([
+                transforms.Resize((self.config.image_size, self.config.image_size)),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.Resize((self.config.image_size, self.config.image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def _get_answer_label(self, answer: str) -> int:
+        """Map a string answer to a class index."""
+        clean_ans = answer.strip().lower()
+        if clean_ans in self.answer_to_idx:
+            return self.answer_to_idx[clean_ans]
+        return 0  # Default to first class if unknown/unmapped (could also map to a specific "unknown" class)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        record = self.samples[idx]
+        image_path = self.data_root / record["image"]
+        
+        # Load image (load_image returns PIL Image)
+        img = load_image(image_path, modality=record.get("modality", "optical"))
+        if not isinstance(img, Image.Image):
+            # In case preprocessing returns a numpy array for SAR/multispectral
+            if hasattr(img, "astype"):
+                import numpy as np
+                if img.dtype != np.uint8:
+                    img = (img * 255).astype(np.uint8)
+                img = Image.fromarray(img)
+            else:
+                img = img.convert("RGB")
+
+        # Apply transforms
+        img_tensor = self.transform(img)
+
+        # Tokenize question
+        question = record["question"]
+        q_ids, _ = self.tokenizer.encode(question, max_length=32)
+        q_tensor = torch.tensor(q_ids, dtype=torch.long)
+
+        # Answer label
+        ans_label = self._get_answer_label(record["answer"])
+        ans_tensor = torch.tensor(ans_label, dtype=torch.long)
+
+        return {
+            "image": img_tensor,
+            "question_ids": q_tensor,
+            "answer_label": ans_tensor,
+            "question_text": question,
+            "answer_text": record["answer"],
+        }
