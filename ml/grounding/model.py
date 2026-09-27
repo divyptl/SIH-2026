@@ -127,10 +127,22 @@ class GroundingModel(nn.Module):
         attention names, `mlp.fc1/fc2`), so checkpoints trained there do not
         load into the transformers 4 model the workspace pins. The tensors are
         identical; only their names moved, so they are renamed back.
+
+        Renaming happens only when the checkpoint and the installed transformers
+        disagree: a transformers 5 checkpoint loads as-is under transformers 5
+        (e.g. the ml/.venv or a Kaggle run pinned to 5.x).
         """
-        if not any(key.startswith(_SWIN_V5_PREFIX) for key in state_dict):
+        checkpoint_v5 = any(key.startswith(_SWIN_V5_PREFIX) for key in state_dict)
+        model_v5 = any(key.startswith(_SWIN_V5_PREFIX) for key in self.model.state_dict())
+        if checkpoint_v5 == model_v5:
             self.model.load_state_dict(state_dict)
             return
+        if model_v5:
+            raise RuntimeError(
+                "This checkpoint uses transformers 4 parameter names, but transformers 5 "
+                "is installed. Load it from an environment with transformers<5 (the uv "
+                "workspace), or add the reverse renaming to GroundingModel.load_weights."
+            )
 
         converted: dict[str, torch.Tensor] = {}
         for key, value in state_dict.items():
