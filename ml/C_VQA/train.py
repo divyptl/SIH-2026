@@ -279,23 +279,25 @@ class ChangeVQATrainer:
         """Save training checkpoint to disk.
 
         Always saves:
-          - ``latest.pt``      — most recent epoch (for easy resume)
-          - ``epoch_NNN.pt``   — individual epoch snapshot
+          - ``last.pt``        — most recent epoch (for easy resume and last epoch)
 
         Conditionally saves:
+          - ``epoch_NNN.pt``   — every save_every epochs or on the last epoch
           - ``best.pt``        — only when *is_best* is True
         """
         ckpt = self._build_checkpoint(epoch)
 
-        # 1. Individual epoch file
-        epoch_path = self.checkpoint_dir / f"epoch_{epoch:03d}.pt"
-        torch.save(ckpt, epoch_path)
+        # 1. last.pt (always overwritten, serves as last epoch & resume)
+        last_path = self.checkpoint_dir / "last.pt"
+        torch.save(ckpt, last_path)
 
-        # 2. latest.pt (always overwritten)
-        latest_path = self.checkpoint_dir / "latest.pt"
-        torch.save(ckpt, latest_path)
-
-        print(f"[ChangeVQATrainer] Saved epoch_{epoch:03d}.pt + latest.pt")
+        # 2. Individual epoch file (every N epochs or last epoch)
+        if epoch % self.cfg.save_every == 0 or epoch == self.cfg.epochs:
+            epoch_path = self.checkpoint_dir / f"epoch_{epoch:03d}.pt"
+            torch.save(ckpt, epoch_path)
+            print(f"[ChangeVQATrainer] Saved epoch_{epoch:03d}.pt and last.pt")
+        else:
+            print(f"[ChangeVQATrainer] Saved last.pt")
 
         # 3. best.pt (only when improved)
         if is_best:
