@@ -95,7 +95,7 @@ function EncodeStep() {
               <img
                 src={view.src}
                 alt={`${view.label} image`}
-                className="aspect-square w-full rounded-lg object-cover ring-1 ring-foreground/10"
+                className="aspect-square w-full rounded-lg object-cover shadow-raised ring-1 ring-foreground/10"
               />
               <p className="mt-1 text-xs text-muted-foreground">{view.label}</p>
             </Appear>
@@ -297,9 +297,9 @@ function AnswerStep() {
         <img
           src={images.optical}
           alt="Optical image"
-          className="aspect-square w-full rounded-lg object-cover ring-1 ring-foreground/10"
+          className="aspect-square w-full rounded-lg object-cover shadow-raised ring-1 ring-foreground/10"
         />
-        <div className="relative aspect-square overflow-hidden rounded-lg ring-1 ring-foreground/10">
+        <div className="relative aspect-square overflow-hidden rounded-lg shadow-raised ring-1 ring-foreground/10">
           <img
             src={images.radar}
             alt="Radar image with the detected water"

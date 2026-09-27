@@ -57,7 +57,7 @@ export function EvidenceOverlay({
 
   return (
     <div
-      className={cn('relative overflow-hidden rounded-lg border', className)}
+      className={cn('relative overflow-hidden rounded-lg border shadow-raised', className)}
     >
       <img src={src} alt={alt} className="block w-full" />
 

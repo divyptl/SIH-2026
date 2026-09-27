@@ -57,7 +57,7 @@ export function FilledSlot({
   const preview = usePreviewUrl(file) ?? serverPreview
 
   return (
-    <div className="relative aspect-square overflow-hidden rounded-lg bg-muted ring-1 ring-foreground/10">
+    <div className="relative aspect-square overflow-hidden rounded-lg bg-muted shadow-raised ring-1 ring-foreground/10">
       {preview ? (
         <img
           src={preview}

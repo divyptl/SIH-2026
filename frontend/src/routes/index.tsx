@@ -298,16 +298,19 @@ function Home() {
                     className="min-h-28 text-base"
                   />
                   <InputGroupAddon align="block-end">
-                    <InputGroupButton
-                      type="button"
-                      disabled={files.length >= MAX_IMAGES}
-                      onClick={() => inputRef.current?.click()}
-                    >
-                      <PaperclipIcon />
-                      {files.length > 0
-                        ? t('home.addImage')
-                        : t('home.attachImage')}
-                    </InputGroupButton>
+                    {/* Hidden rather than disabled when both slots are full: a
+                        disabled control dims the whole input group. */}
+                    {files.length < MAX_IMAGES && (
+                      <InputGroupButton
+                        type="button"
+                        onClick={() => inputRef.current?.click()}
+                      >
+                        <PaperclipIcon />
+                        {files.length > 0
+                          ? t('home.addImage')
+                          : t('home.attachImage')}
+                      </InputGroupButton>
+                    )}
                     <InputGroupText className="ms-auto text-xs tabular-nums">
                       {files.length === 0
                         ? t('home.noAttachment')

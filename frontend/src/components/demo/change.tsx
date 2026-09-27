@@ -260,13 +260,13 @@ function ChangeStep() {
           <img
             src={images.before}
             alt=""
-            className="size-14 rounded-md object-cover ring-1 ring-foreground/10"
+            className="size-14 rounded-md object-cover shadow-raised ring-1 ring-foreground/10"
           />
           <span className="text-muted-foreground">+</span>
           <img
             src={images.after}
             alt=""
-            className="size-14 rounded-md object-cover ring-1 ring-foreground/10"
+            className="size-14 rounded-md object-cover shadow-raised ring-1 ring-foreground/10"
           />
           <ArrowRightIcon className="size-4 text-muted-foreground" />
           <span className="text-sm font-medium">{model.backbone}</span>

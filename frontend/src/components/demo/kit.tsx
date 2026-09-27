@@ -247,7 +247,7 @@ export function Frame({
         className,
       )}
     >
-      <div className="relative aspect-square overflow-hidden rounded-lg ring-1 ring-foreground/10">
+      <div className="relative aspect-square overflow-hidden rounded-lg shadow-raised ring-1 ring-foreground/10">
         <img src={src} alt={alt} className="size-full object-cover" />
         {children}
       </div>

@@ -17,9 +17,9 @@ export function AnalysisPending({ files }: { files: Array<File> }) {
 
   return (
     <Card>
-      <CardContent className="grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] lg:gap-8">
+      <CardContent className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)] lg:gap-8">
         <div className="relative">
-          <div className="graticule relative aspect-square overflow-hidden rounded-lg bg-muted ring-1 ring-foreground/10">
+          <div className="graticule relative aspect-square overflow-hidden rounded-lg bg-muted shadow-raised ring-1 ring-foreground/10">
             <div
               className={
                 files.length > 1

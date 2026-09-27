@@ -15,19 +15,16 @@ import { useTranslation } from 'react-i18next'
 import { ChangeSwipe } from '#/components/change-swipe'
 import { EvidenceOverlay } from '#/components/evidence-overlay'
 import { ReportButton } from '#/components/report-button'
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from '#/components/ui/accordion'
 import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
 import { Badge } from '#/components/ui/badge'
 import { Button } from '#/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '#/components/ui/card'
-import {
-  Item,
-  ItemActions,
-  ItemContent,
-  ItemDescription,
-  ItemGroup,
-  ItemMedia,
-  ItemTitle,
-} from '#/components/ui/item'
 import { Progress } from '#/components/ui/progress'
 import { Separator } from '#/components/ui/separator'
 import {
@@ -187,23 +184,28 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
         </ToggleGroup>
       )}
       {hasMask && (
-        <div className="ms-auto flex items-center gap-2 text-xs text-muted-foreground">
-          <span aria-hidden className="size-2.5 rounded-full bg-fuchsia-500" />
+        <div className="ms-auto flex items-center gap-2 text-xs whitespace-nowrap text-muted-foreground">
+          <span
+            aria-hidden
+            className="size-2.5 shrink-0 rounded-full bg-fuchsia-500"
+          />
           {t('result.changeMask')}
           <span id={maskLabelId} className="sr-only">
             {t('result.maskOpacity')}
           </span>
-          <Slider
-            min={0}
-            max={100}
-            step={5}
-            value={[maskOpacity]}
-            onValueChange={(value) => setMaskOpacity(firstValue(value))}
-            aria-labelledby={maskLabelId}
-            format={{ style: 'unit', unit: 'percent' }}
-            className="w-28"
-          />
-          <span className="w-9 text-end text-foreground tabular-nums">
+          {/* The slider fills its parent, so the parent sets its width. */}
+          <div className="w-28 shrink-0">
+            <Slider
+              min={0}
+              max={100}
+              step={5}
+              value={[maskOpacity]}
+              onValueChange={(value) => setMaskOpacity(firstValue(value))}
+              aria-labelledby={maskLabelId}
+              format={{ style: 'unit', unit: 'percent' }}
+            />
+          </div>
+          <span className="w-9 shrink-0 text-end text-foreground tabular-nums">
             {maskOpacity}%
           </span>
         </div>
@@ -265,11 +267,11 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
           className={cn(
             'grid gap-8',
             previews.length > 0 &&
-              'lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]',
+              'lg:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)]',
           )}
         >
           {previews.length > 0 && (
-            <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20 lg:self-start">
+            <div className="mx-auto flex w-full max-w-xl min-w-0 flex-col gap-3 lg:sticky lg:top-20 lg:self-start">
               {viewerControls}
 
               {isPair && view === 'swipe' ? (
@@ -417,18 +419,17 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
                 <h3 className="font-heading text-sm font-semibold">
                   {t('result.evidence', { count: result.evidence.length })}
                 </h3>
-                <ItemGroup className="-mx-3">
+                <Accordion multiple className="-mx-2">
                   {result.evidence.map((item, index) => {
                     const isSpatial =
                       (item.type === 'bbox' || item.type === 'mask') &&
                       item.data
                     const label = labelOf(index)
+                    const description = descriptionOf(index)
                     return (
-                      <Item
+                      <AccordionItem
                         key={index}
-                        role="listitem"
-                        size="sm"
-                        variant={activeEvidence === index ? 'muted' : 'default'}
+                        value={index}
                         render={
                           <motion.div
                             initial={{ opacity: 0, y: 4 }}
@@ -438,11 +439,15 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
                         }
                         onMouseEnter={() => setActiveEvidence(index)}
                         onMouseLeave={() => setActiveEvidence(null)}
+                        className={cn(
+                          'rounded-lg px-2 transition-colors',
+                          activeEvidence === index && 'bg-muted',
+                        )}
                       >
-                        <ItemMedia>
+                        <AccordionTrigger className="items-center gap-3 text-start">
                           <span
                             className={cn(
-                              'flex size-6 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums',
+                              'flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums',
                               item.type === 'mask'
                                 ? 'bg-fuchsia-500 text-white'
                                 : isSpatial
@@ -452,33 +457,35 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
                           >
                             {index + 1}
                           </span>
-                        </ItemMedia>
-                        <ItemContent
+                          {/* Observations have no label; their description
+                              stands in, cut to one line until opened. */}
+                          <span
+                            lang={lang.code}
+                            dir={lang.dir}
+                            className={cn(
+                              'min-w-0 flex-1',
+                              label ? 'first-letter:uppercase' : 'truncate',
+                            )}
+                          >
+                            {label ?? description}
+                          </span>
+                          {item.confidence !== null && (
+                            <span className="shrink-0 text-xs font-normal text-muted-foreground tabular-nums">
+                              {Math.round(item.confidence * 100)}%
+                            </span>
+                          )}
+                        </AccordionTrigger>
+                        <AccordionContent
                           lang={lang.code}
                           dir={lang.dir}
-                          className="min-w-0 gap-0.5"
+                          className="ps-9 text-muted-foreground"
                         >
-                          {label && (
-                            <ItemTitle className="line-clamp-none">
-                              {/* A flex item, so first-letter applies to it. */}
-                              <span className="first-letter:uppercase">
-                                {label}
-                              </span>
-                            </ItemTitle>
-                          )}
-                          <ItemDescription className="line-clamp-none text-start">
-                            {descriptionOf(index)}
-                          </ItemDescription>
-                        </ItemContent>
-                        {item.confidence !== null && (
-                          <ItemActions className="self-start text-xs text-muted-foreground tabular-nums">
-                            {Math.round(item.confidence * 100)}%
-                          </ItemActions>
-                        )}
-                      </Item>
+                          {description}
+                        </AccordionContent>
+                      </AccordionItem>
                     )
                   })}
-                </ItemGroup>
+                </Accordion>
                 {observations.length > 0 && previews.length > 0 && (
                   <p className="text-xs text-muted-foreground">
                     {t('result.noSpatial', { count: observations.length })}
