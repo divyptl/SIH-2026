@@ -66,7 +66,7 @@ same input always gets the same task:
 
 | Task | Approach | Fine-tuned on | Measured |
 |---|---|---|---|
-| Visual Question Answering / Captioning | SkyEyeGPT on the MiniGPT-v2 runtime ([ml/vqa](ml/vqa/README.md)) | RSVQA, VRSBench | Not yet wired into the backend |
+| Visual Question Answering | ConvNeXt-Tiny image encoder + question encoder joined by cross-attention; classifies the answer from a fixed vocabulary (yes/no, land cover, counts) ([details](ml/vqa/README.md)) | RSVQA-LR (planned) | Not trained or wired into the backend yet |
 | Text-guided Region Grounding | GroundingDINO proposes 10 boxes, an ensemble of 5 re-rankers picks the described one ([details](docs/grounding-module-explained.md)) | VRSBench | 67.5% Acc@0.5 on 16,146 VRSBench validation expressions (storage tanks: 85.1%) |
 | Change Detection / Change-VQA | Siamese ResNet-34 + question head; tiled change mask, each changed region named by the model ([details](ml/C_VQA/README.md)) | LEVIR-CD (0.5 m aerial) + Sentinel-2 pairs labelled with Dynamic World (10 m) | Answer accuracy 81% (Dynamic World) / 83% (LEVIR); mask F1 0.58 / 0.88 |
 | Optical–SAR Fusion | ResNet-50 dual encoder, contrastive pretraining, terrain-classification head; SAR backscatter water mask | SEN1-2 (Sentinel-1 & 2) | 84.7% SAR→optical matching on validation; SAR water share within 5.7 points of the hand labels on 8 Sen1Floods11 chips |
@@ -78,8 +78,10 @@ range the result carries a warning saying why. Every result is labelled
 
 ### Current limitations
 
-- **Single-image VQA / captioning** has no specialist yet (SkyEyeGPT is not
-  installed), and the general-VLM fallback is switched off, so a single-image
+- **Single-image VQA / captioning** has no working specialist yet: the
+  `ml/vqa` model has no trained checkpoint, doesn't import after its last
+  rewrite, and only classifies a fixed set of answers, so it can't write
+  captions. The general-VLM fallback is switched off, so a single-image
   question without a location word gets a placeholder answer. The same happens
   when imagery fails the resolution check or a specialist errors.
 - **Fusion:** `checkpoints/fusion_best.pt` was trained with 4 land types
@@ -122,7 +124,7 @@ range the result carries a warning saying why. Every result is labelled
 /backend               # FastAPI service, controller, validation, report generation
 /ml
   /datasets            # PyTorch dataset loaders (SEN1-2, BigEarthNet, etc.)
-  /vqa                 # VQA + captioning model, training and inference
+  /vqa                 # Single-image VQA model, training and inference
   /grounding           # Grounding model, training and inference
   /C_VQA               # Change VQA model: data pipeline, training, evaluation, inference
   /fusion              # Optical-SAR fusion model, contrastive pretraining
