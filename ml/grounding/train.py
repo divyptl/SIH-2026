@@ -190,7 +190,7 @@ def train_one_epoch(
     device: str,
     epoch: int,
     cfg: TrainConfig,
-    scaler: torch.amp.GradScaler | None = None,
+    scaler: torch.cuda.amp.GradScaler | None = None,
     amp_dtype: torch.dtype = torch.float32,
     ddp_model: DistributedDataParallel | None = None,
 ) -> dict[str, float]:
@@ -358,7 +358,7 @@ def save_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     metrics: dict,
     model_cfg: ModelConfig,
-    scaler: torch.amp.GradScaler | None = None,
+    scaler: torch.cuda.amp.GradScaler | None = None,
     history: list[dict] | None = None,
     best_val_loss: float | None = None,
 ) -> None:
@@ -399,7 +399,7 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: str,
-    scaler: torch.amp.GradScaler | None = None,
+    scaler: torch.cuda.amp.GradScaler | None = None,
 ) -> tuple[int, list[dict], float]:
     """Load a checkpoint. Returns (last completed epoch, history, best val loss)."""
     ckpt = torch.load(path, map_location=device, weights_only=False)
@@ -693,7 +693,7 @@ def main() -> None:
     # Create the grad scaler before the training loop. fp16 needs loss
     # scaling to avoid gradient underflow; bf16 does not.
     scaler = (
-        torch.amp.GradScaler(device)
+        torch.cuda.amp.GradScaler()
         if use_amp and amp_dtype == torch.float16
         else None
     )

@@ -83,7 +83,7 @@ def train_one_epoch(
     train_loaders: list[DataLoader],
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
-    scaler: torch.amp.GradScaler | None,
+    scaler: torch.cuda.amp.GradScaler | None,
     use_amp: bool,
     device: str,
     epoch: int,
@@ -121,7 +121,7 @@ def train_one_epoch(
             terrain_labels = terrain_labels.to(device)
 
             # Forward pass under autocast
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.cuda.amp.autocast(enabled=use_amp):
                 sar_emb, opt_emb = model(sar, optical)
 
                 # Contrastive loss (in-domain only)
@@ -235,7 +235,7 @@ def evaluate(
             optical = normalize_optical(optical.to(device))
             terrain_labels = terrain_labels.to(device)
 
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.cuda.amp.autocast(enabled=use_amp):
                 sar_emb, opt_emb = model(sar, optical)
                 _, metrics = loss_fn(sar_emb, opt_emb)
 
@@ -271,7 +271,7 @@ def save_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     metrics: dict,
     model_cfg: ModelConfig,
-    scaler: torch.amp.GradScaler | None = None,
+    scaler: torch.cuda.amp.GradScaler | None = None,
 ) -> None:
     """Save a training checkpoint."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,7 +304,7 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: str,
-    scaler: torch.amp.GradScaler | None = None,
+    scaler: torch.cuda.amp.GradScaler | None = None,
 ) -> int:
     """Load a checkpoint. Returns the epoch to resume from."""
     ckpt = torch.load(path, map_location=device, weights_only=False)
@@ -511,7 +511,7 @@ def main() -> None:
     # Create the grad scaler before the training loop (and before resuming, so
     # a checkpoint can restore its loss scale)
     use_amp = train_cfg.use_amp and device == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
 
     # ── Resume ──
     start_epoch = 1
@@ -523,7 +523,7 @@ def main() -> None:
 
     # ── AMP setup ──
     use_amp = train_cfg.use_amp and device == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
 
     # ── Training loop ──
     print(f"\nStarting training from epoch {start_epoch}...\n")

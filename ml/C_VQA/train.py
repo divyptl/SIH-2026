@@ -133,7 +133,7 @@ class ChangeVQATrainer:
         # Mixed-precision training (AMP): create the grad scaler once, before the
         # training loop, so its loss scale adapts across steps
         self.use_amp = self.cfg.use_amp and self.device == "cuda"
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
     def train_epoch(self, epoch: int) -> dict[str, float]:
         """Run one training epoch."""
@@ -154,7 +154,7 @@ class ChangeVQATrainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             # Forward pass under autocast
-            with torch.amp.autocast("cuda", enabled=self.use_amp):
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
                 outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
                 loss, metrics = self.criterion(outputs, ans_targets, mask_targets)
 
@@ -213,7 +213,7 @@ class ChangeVQATrainer:
             q_ids = batch["question_ids"].to(self.device)
             ans_targets = batch["answer_targets"].to(self.device)
             mask_targets = batch["mask_targets"].to(self.device) if batch["mask_targets"] is not None else None
-            with torch.amp.autocast("cuda", enabled=self.use_amp):
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
                 outputs = self.model(t1=t1, t2=t2, question_ids=q_ids)
                 loss, _ = self.criterion(outputs, ans_targets, mask_targets)
             total_loss += loss.item()
