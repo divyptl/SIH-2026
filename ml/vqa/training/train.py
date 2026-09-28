@@ -94,6 +94,7 @@ def main(argv=None) -> int:
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--num-workers", type=int, default=4)
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO)
@@ -103,6 +104,7 @@ def main(argv=None) -> int:
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
+        num_workers=args.num_workers,
     )
     model_config = ModelConfig()
 

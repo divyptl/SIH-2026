@@ -117,7 +117,7 @@ def normalize_image(
         band = arr if arr.ndim == 2 else arr[0]
         stretched = _percentile_stretch(band)
         rgb = np.stack([stretched] * 3, axis=-1)
-        logger.info(
+        logger.debug(
             "normalize_image: 1-band input (modality=%s) -> grayscale RGB visualization",
             modality,
         )
@@ -130,7 +130,7 @@ def normalize_image(
     if n_bands >= max(rgb_bands):
         r, g, b = rgb_bands
         chans = [_percentile_stretch(arr[idx - 1]) for idx in (r, g, b)]
-        logger.info(
+        logger.debug(
             "normalize_image: %d-band multispectral input -> RGB composite using "
             "1-indexed bands %s (documented default mapping, see config.py)",
             n_bands, rgb_bands,
