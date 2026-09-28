@@ -79,6 +79,12 @@ class VQADataset(Dataset):
         record = self.samples[idx]
         image_path = self.data_root / record["image"]
         
+        # Kaggle workaround: If Images.zip extracts into Images/Images/..., gracefully fall back
+        if not image_path.exists():
+            fallback_path = self.data_root / "Images" / record["image"]
+            if fallback_path.exists():
+                image_path = fallback_path
+        
         # Load image (load_image returns PIL Image)
         img = load_image(image_path, modality=record.get("modality", "optical"))
         if not isinstance(img, Image.Image):
