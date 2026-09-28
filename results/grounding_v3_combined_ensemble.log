@@ -1,0 +1,26 @@
+Device: cuda  |  precision: torch.bfloat16  |  image size: 512
+  Loading VRSBench annotations from xiang709/VRSBench/VRSBench_EVAL_referring.json...
+  Using existing extracted images: data\vrsbench\extracted\validation
+  VRSBench grounding [validation]: 16146 samples loaded
+  Froze 197 text encoder parameters
+  Warning: re-ranker was trained on candidates from checkpoints/grounding/v3/final.pt
+Loaded checkpoints/grounding/v3/last.pt (epoch 5) + 5 re-ranker(s)
+
+  [400/16146] 8.5 samples/s, ~31 min left
+  [800/16146] 9.5 samples/s, ~27 min left
+  [1200/16146] 10.0 samples/s, ~25 min left
+  [1600/16146] 10.2 samples/s, ~24 min left
+  [2000/16146] 10.2 samples/s, ~23 min left
+  [2400/16146] 10.2 samples/s, ~22 min left
+  [2800/16146] 10.2 samples/s, ~22 min left
+  [3200/16146] 10.3 samples/s, ~21 min left
+  [3600/16146] 10.3 samples/s, ~20 min left
+  [4000/16146] 10.3 samples/s, ~20 min left
+  [4400/16146] 10.2 samples/s, ~19 min left
+  [4800/16146] 10.3 samples/s, ~18 min left
+  [5200/16146] 10.3 samples/s, ~18 min left
+  [5600/16146] 10.3 samples/s, ~17 min left
+  [6000/16146] 10.3 samples/s, ~16 min left
+  [6400/16146] 10.2 samples/s, ~16 min left
+  [6800/16146] 10.2 samples/s, ~15 min left
+  [7200/16146] 10.2 samples/s, ~15 min left

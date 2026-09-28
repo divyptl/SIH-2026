@@ -159,6 +159,9 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
   const isPair =
     previews.length === 2 &&
     result.trace.input_configuration === 'bi_temporal_pair'
+  // Two images side by side need the card's full width to stay legible, so the
+  // answer moves below them; a single image or the swipe keeps the columns.
+  const sideBySide = previews.length > 1 && !(isPair && view === 'swipe')
   const hasMask = result.evidence.some(
     (item) => item.type === 'mask' && item.data,
   )
@@ -273,11 +276,19 @@ export function AnalysisResult({ result, query }: AnalysisResultProps) {
           className={cn(
             'grid gap-8',
             previews.length > 0 &&
+              !sideBySide &&
               'lg:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)]',
           )}
         >
           {previews.length > 0 && (
-            <div className="mx-auto flex w-full max-w-xl min-w-0 flex-col gap-3 lg:sticky lg:top-20 lg:self-start">
+            <div
+              className={cn(
+                'mx-auto flex w-full min-w-0 flex-col gap-3',
+                sideBySide
+                  ? 'max-w-5xl'
+                  : 'max-w-xl lg:sticky lg:top-20 lg:self-start',
+              )}
+            >
               {viewerControls}
 
               {isPair && view === 'swipe' ? (
