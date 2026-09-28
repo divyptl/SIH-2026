@@ -7,6 +7,7 @@ into the flattened train.jsonl and val.jsonl manifests expected by our VQAModel.
 
 import json
 import zipfile
+import ijson
 from pathlib import Path
 from tqdm import tqdm
 from collections import defaultdict
@@ -21,11 +22,6 @@ def extract_zip(zip_path: Path, extract_to: Path):
         zip_ref.extractall(extract_to)
 
 
-def load_json(path: Path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
 def process_rsvqa_split(split: str, source_dir: Path, out_path: Path, img_dir_name: str):
     q_file = source_dir / f"RSVQAxBEN_split_{split}_questions.json"
     a_file = source_dir / f"RSVQAxBEN_split_{split}_answers.json"
@@ -36,35 +32,44 @@ def process_rsvqa_split(split: str, source_dir: Path, out_path: Path, img_dir_na
         return
 
     print(f"\nProcessing {split} split...")
-    questions = load_json(q_file)
-    answers = load_json(a_file)
-    images = load_json(i_file)
     
-    # RSVQA answers list contains all answers. Map question_id -> list of answers.
-    ans_by_qid = defaultdict(list)
-    for ans in answers["answers"]:
-        ans_by_qid[ans["question_id"]].append(ans["answer"])
-        
-    # Map image_id -> filename (assuming BigEarthNet naming or generic IDs)
+    # 1. Map Image IDs to Filenames (Memory efficient)
+    print("Loading Image references...")
     img_by_id = {}
-    for img in images["images"]:
-        # If filename is provided, use it, else assume ID + .tif (common in RSVQA)
-        filename = img.get("filename", f"{img['id']}.tif")
-        img_by_id[img["id"]] = filename
+    with open(i_file, "rb") as f:
+        for img in tqdm(ijson.items(f, "images.item")):
+            if not img.get("active", True):
+                continue
+            filename = img.get("filename", f"{img['id']}.tif")
+            img_by_id[img["id"]] = filename
 
+    # 2. Map Question IDs to Answers (Memory efficient)
+    print("Loading Answer references...")
+    ans_by_qid = defaultdict(list)
+    with open(a_file, "rb") as f:
+        for ans in tqdm(ijson.items(f, "answers.item")):
+            if not ans.get("active", True):
+                continue
+            if "question_id" in ans and "answer" in ans:
+                ans_by_qid[ans["question_id"]].append(ans["answer"])
+        
     out_file = out_path / f"{split}.jsonl"
     print(f"Writing to {out_file.name}...")
     
-    with open(out_file, "w", encoding="utf-8") as f:
-        for q in tqdm(questions["questions"]):
-            qid = q["id"]
-            img_id = q["img_id"]
-            q_text = q["question"]
+    # 3. Stream Questions and write JSONL immediately (Memory efficient)
+    with open(q_file, "rb") as f, open(out_file, "w", encoding="utf-8") as out:
+        for q in tqdm(ijson.items(f, "questions.item")):
+            if not q.get("active", True):
+                continue
+                
+            qid = q.get("id")
+            img_id = q.get("img_id")
+            q_text = q.get("question")
             
             if qid not in ans_by_qid or img_id not in img_by_id:
                 continue
                 
-            # Take the first available answer (or use majority vote if preferred)
+            # Take the first available answer
             ans_text = ans_by_qid[qid][0]
             img_filename = img_by_id[img_id]
             
@@ -72,9 +77,9 @@ def process_rsvqa_split(split: str, source_dir: Path, out_path: Path, img_dir_na
                 "image": f"{img_dir_name}/{img_filename}",
                 "question": q_text,
                 "answer": ans_text,
-                "modality": "multispectral"  # BigEarthNet is typically multispectral/optical
+                "modality": "multispectral"
             }
-            f.write(json.dumps(record) + "\n")
+            out.write(json.dumps(record) + "\n")
 
 
 def prepare_rsvqa(source_dir: str, output_dir: str = "data/rsvqaxben_processed"):
