@@ -67,7 +67,7 @@ same input always gets the same task:
 | Task | Approach | Fine-tuned on | Measured |
 |---|---|---|---|
 | Visual Question Answering | ConvNeXt-Tiny image encoder + question encoder joined by cross-attention; classifies the answer from a fixed vocabulary (yes/no, land cover, counts) ([details](ml/vqa/README.md)) | RSVQA-LR (planned) | Not trained or wired into the backend yet |
-| Text-guided Region Grounding | GroundingDINO proposes 10 boxes, an ensemble of 5 re-rankers picks the described one ([details](docs/grounding-module-explained.md)) | VRSBench | 67.5% Acc@0.5 on 16,146 VRSBench validation expressions (storage tanks: 85.1%) |
+| Text-guided Region Grounding | GroundingDINO proposes 10 boxes, an ensemble of 5 re-rankers picks the described one ([details](docs/grounding-module-explained.md)) | VRSBench + DIOR-RSVG | 68.2% Acc@0.5 on 16,146 VRSBench validation expressions (storage tanks: 83.4%); 73.7% Acc@0.5 on 7,500 held-out DIOR-RSVG test expressions |
 | Change Detection / Change-VQA | Siamese ResNet-34 + question head; tiled change mask, each changed region named by the model ([details](ml/C_VQA/README.md)) | LEVIR-CD (0.5 m aerial) + Sentinel-2 pairs labelled with Dynamic World (10 m) | Answer accuracy 81% (Dynamic World) / 83% (LEVIR); mask F1 0.58 / 0.88 |
 | Optical–SAR Fusion | ResNet-50 dual encoder, contrastive pretraining, terrain-classification head; SAR backscatter water mask | SEN1-2 (Sentinel-1 & 2) | 84.7% SAR→optical matching on validation; SAR water share within 5.7 points of the hand labels on 8 Sen1Floods11 chips |
 

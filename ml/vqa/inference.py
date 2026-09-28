@@ -1,10 +1,17 @@
 """
-SatQuery-facing wrapper for the VQA / Captioning specialist.
+Inference for the single-image VQA specialist.
 
-Implements:
-    predict(request: ModelRequest) -> ModelResponse
+Two entry points:
+    VQAModel.answer(image, question)  -> {"answer", "confidence", "top"}
+        used by the backend (backend/services/specialists.py)
+    VQAModel.predict(ModelRequest)    -> ModelResponse
+        the ml/controller/schema.py SpecialistModel protocol
 
-per ml/controller/schema.py's SpecialistModel protocol.
+The model is single-image only: it answers by choosing from the answer
+vocabulary it was trained with. Two-image (change) questions belong to
+ml.C_VQA, and captions are not something a classifier can write.
+
+    python -m ml.vqa.inference --image tile.png --query "How many ships are there?"
 """
 from __future__ import annotations
 
@@ -13,17 +20,27 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
 import torch
+from PIL import Image
+
+from .model import VQAModel as CoreVQAModel
+from .preprocessing import (
+    ImageReadError,
+    UnsupportedBandCountError,
+    UnsupportedFormatError,
+    load_image,
+)
+from .training.dataset import eval_transform
 
 logger = logging.getLogger(__name__)
 
 try:
     from ..controller.schema import ModelRequest, ModelResponse  # type: ignore
 except Exception:  # pragma: no cover
-    logger.warning("Could not import schema; using local fallback.")
-
     @dataclass
     class ModelRequest:  # type: ignore
         query: str
@@ -39,153 +56,140 @@ except Exception:  # pragma: no cover
         model_name: str
         execution_time_ms: float
 
-from .config import ModelConfig
-from .model import VQAModel as CoreVQAModel
-from .preprocessing import (
-    load_image,
-    UnsupportedFormatError,
-    ImageReadError,
-    UnsupportedBandCountError,
-)
-from torchvision import transforms
+DEFAULT_CHECKPOINT = "checkpoints/vqa/best.pt"
+MODEL_NAME = "SatQuery-VQA"
+# preprocessing.load_image renders each of these to RGB; the model was trained
+# on optical RGB tiles, so other modalities are answered less reliably.
+SUPPORTED_MODALITIES = {"optical", "multispectral", "sar"}
 
 
 class VQARequestError(ValueError):
-    """Malformed/unsupported ModelRequest content."""
+    """Malformed or unsupported request."""
+
+
+def _resolve_device(device: str) -> str:
+    if device == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return device
+
+
+def _to_pil(image, modality: str = "optical") -> Image.Image:
+    if isinstance(image, (str, Path)):
+        image = load_image(image, modality=modality)
+    elif isinstance(image, np.ndarray):
+        if image.dtype != np.uint8:
+            image = (np.clip(image, 0, 1) * 255).astype(np.uint8)
+        image = Image.fromarray(image)
+    if not isinstance(image, Image.Image):
+        raise VQARequestError(f"Expected a path, PIL image or array, got {type(image).__name__}")
+    return image.convert("RGB")
 
 
 class VQAModel:
-    """
-    SatQuery specialist model for single-image VQA + captioning.
+    """Single-image VQA specialist.
 
-    Wraps the PyTorch VQAModel backend behind the ModelRequest -> ModelResponse
-    interface expected by the controller.
+    Args:
+        backend: A loaded ml.vqa.model.VQAModel. When omitted, it is loaded
+            from `checkpoint` on first use.
+        checkpoint: Checkpoint written by ml.vqa.training.train.
+        device: 'auto', 'cpu', 'cuda', ...
     """
 
-    def __init__(self, backend: Optional[CoreVQAModel] = None, config: Optional[ModelConfig] = None):
-        self.config = config or ModelConfig()
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+    def __init__(
+        self,
+        backend: Optional[CoreVQAModel] = None,
+        checkpoint: str | Path = DEFAULT_CHECKPOINT,
+        device: str = "auto",
+    ) -> None:
+        self.device = _resolve_device(device)
+        self.checkpoint = Path(checkpoint)
         self._backend = backend
-        self.transform = transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+        if backend is not None:
+            backend.to(self.device).eval()
+
+    @classmethod
+    def from_checkpoint(cls, checkpoint: str | Path, device: str = "auto") -> "VQAModel":
+        wrapper = cls(checkpoint=checkpoint, device=device)
+        _ = wrapper.backend      # load now, so a bad checkpoint fails here
+        return wrapper
 
     @property
     def backend(self) -> CoreVQAModel:
         if self._backend is None:
-            if self.config.checkpoint_path and self.config.checkpoint_path.exists():
-                self._backend = CoreVQAModel.from_checkpoint(str(self.config.checkpoint_path), device=self.config.device)
-            else:
-                logger.warning(f"No checkpoint found at {self.config.checkpoint_path}. Using uninitialized weights.")
-                self._backend = CoreVQAModel()
-                self._backend.to(self.config.device)
-                self._backend.eval()
+            if not self.checkpoint.is_file():
+                raise FileNotFoundError(
+                    f"No VQA checkpoint at {self.checkpoint}. Train one with "
+                    "`python -m ml.vqa.training.train`."
+                )
+            self._backend = CoreVQAModel.from_checkpoint(str(self.checkpoint), device=self.device)
         return self._backend
 
-    def _validate(self, request: ModelRequest) -> None:
-        if not request.images:
-            raise VQARequestError("No image supplied. Exactly one image required.")
-        if len(request.images) > 1:
-            raise VQARequestError("Multiple images supplied. Single-image VQA accepts exactly one.")
-        if request.modalities:
-            unknown = set(request.modalities) - SUPPORTED_MODALITIES
-            if unknown:
-                raise VQARequestError(f"Unsupported modalities: {sorted(unknown)}")
+    @torch.no_grad()
+    def answer(self, image, question: str, modality: str = "optical", top_k: int = 5) -> dict:
+        """Answer one question about one image.
 
-    def _resolve_task(self, request: ModelRequest) -> str:
-        if request.task_hint in ("vqa", "captioning"):
-            return request.task_hint
-        return "vqa" if request.query and request.query.strip() else "captioning"
+        Returns {"answer": str, "confidence": float, "top": [(answer, prob), ...]}
+        with `top` sorted by probability, best first.
+        """
+        if not question or not question.strip():
+            raise VQARequestError("Empty question.")
+        model = self.backend
+        size = getattr(model, "image_size", 256)
+        pixels = eval_transform(size)(_to_pil(image, modality)).unsqueeze(0).to(self.device)
+        out = model(image=pixels, question_text=question)
+        probs = out["answer_logits"].float().softmax(-1)[0]
+        values, indices = probs.topk(min(top_k, probs.numel()))
+        top = [(model.answers_vocab[int(i)], float(v)) for v, i in zip(values, indices)]
+        return {"answer": top[0][0], "confidence": top[0][1], "top": top}
 
     def predict(self, request: ModelRequest) -> ModelResponse:
+        """SpecialistModel protocol: errors come back as an "ERROR: ..." answer."""
         start = time.perf_counter()
         try:
-            self._validate(request)
-            modality = request.modalities[0] if request.modalities else "optical"
-            image_path = request.images[0]
-            
-            # Load and transform image
-            img = load_image(image_path, modality=modality)
-            if hasattr(img, "astype"):
-                import numpy as np
-                if img.dtype != np.uint8:
-                    img = (img * 255).astype(np.uint8)
-                from PIL import Image
-                img = Image.fromarray(img)
-            else:
-                img = img.convert("RGB")
-            
-            img_tensor = self.transform(img).unsqueeze(0).to(self.config.device)
-
-            task = self._resolve_task(request)
-            query_str = request.query if task == "vqa" else "Describe this image."
-
-            with torch.no_grad():
-                outputs = self.backend(
-                    image=img_tensor,
-                    question_text=query_str
+            if not request.images:
+                raise VQARequestError("No image supplied. Exactly one image is required.")
+            if len(request.images) > 1:
+                raise VQARequestError(
+                    "Multiple images supplied. Single-image VQA takes exactly one; questions "
+                    "about change between two images go to Change-VQA (ml.C_VQA)."
                 )
-            
-            answer = outputs["predicted_answer_text"][0]
-            confidence = outputs["answer_confidence"][0].item()
-            model_name = "SatQuery-VQA-Custom"
-
-        except (
-            VQARequestError,
-            UnsupportedFormatError,
-            ImageReadError,
-            UnsupportedBandCountError,
-        ) as exc:
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.warning("VQAModel.predict rejected request: %s", exc)
+            modality = request.modalities[0] if request.modalities else "optical"
+            if modality not in SUPPORTED_MODALITIES:
+                raise VQARequestError(f"Unsupported modality: {modality}")
+            if request.task_hint == "captioning":
+                raise VQARequestError(
+                    "Captioning is not supported: this model answers questions by choosing "
+                    "from a fixed answer list."
+                )
+            result = self.answer(request.images[0], request.query, modality)
+        except (VQARequestError, UnsupportedFormatError, ImageReadError,
+                UnsupportedBandCountError) as exc:
+            logger.warning("VQA request rejected: %s", exc)
             return ModelResponse(
-                answer=f"ERROR: {exc}",
-                confidence=0.0,
-                evidence=[],
-                model_name="SatQuery-VQA-Custom",
-                execution_time_ms=elapsed_ms,
+                answer=f"ERROR: {exc}", confidence=0.0, evidence=[], model_name=MODEL_NAME,
+                execution_time_ms=(time.perf_counter() - start) * 1000,
             )
-
-        elapsed_ms = (time.perf_counter() - start) * 1000
         return ModelResponse(
-            answer=answer,
-            confidence=confidence,
-            evidence=[],
-            model_name=model_name,
-            execution_time_ms=elapsed_ms,
+            answer=result["answer"], confidence=result["confidence"], evidence=[],
+            model_name=MODEL_NAME, execution_time_ms=(time.perf_counter() - start) * 1000,
         )
 
 
-def _build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="SatQuery VQA CLI (standalone test harness)")
-    p.add_argument("--image", required=True, help="Path to the RS image (jpg/png/tif/tiff)")
-    p.add_argument("--query", default="", help="Natural-language question")
-    p.add_argument("--task", choices=["vqa", "captioning"], default=None)
-    p.add_argument("--modality", choices=sorted(SUPPORTED_MODALITIES), default="optical")
-    return p
-
-
 def main(argv: Optional[List[str]] = None) -> int:
+    p = argparse.ArgumentParser(description="Ask the single-image VQA model a question")
+    p.add_argument("--image", required=True)
+    p.add_argument("--query", required=True)
+    p.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
+    p.add_argument("--modality", choices=sorted(SUPPORTED_MODALITIES), default="optical")
+    p.add_argument("--device", default="auto")
+    args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
-    args = _build_arg_parser().parse_args(argv)
 
-    task_hint = args.task or ("vqa" if args.query.strip() else "captioning")
-    request = ModelRequest(
-        query=args.query,
-        images=[args.image],
-        modalities=[args.modality],
-        task_hint=task_hint,
-    )
-
-    model = VQAModel()
-    response = model.predict(request)
-
-    print(f"model_name       : {response.model_name}")
-    print(f"answer           : {response.answer}")
-    print(f"confidence       : {response.confidence:.3f}")
-    print(f"execution_time_ms: {response.execution_time_ms:.1f}")
+    model = VQAModel.from_checkpoint(args.checkpoint, device=args.device)
+    result = model.answer(args.image, args.query, args.modality)
+    print(f"answer     : {result['answer']}")
+    print(f"confidence : {result['confidence']:.3f}")
+    print("top answers: " + ", ".join(f"{a} ({p:.2f})" for a, p in result["top"]))
     return 0
 
 

@@ -81,8 +81,11 @@ TOOL_REGISTRY: dict[Task, ToolEntry] = {
         name="rs-vqa",
         task="vqa",
         description="Answers a factual question about a single optical/multispectral or SAR image.",
-        accepts=("single", "cross_modal_pair", "bi_temporal_pair"),
+        # Single images only: image pairs go to change_vqa (two dates) or fusion
+        # (optical + SAR), so the two VQA models never answer each other's inputs.
+        accepts=("single",),
         specialist_module="ml.vqa",
+        **_specialist(specialists.run_vqa, _settings.vqa_checkpoint),
     ),
     "caption": ToolEntry(
         name="rs-captioner",

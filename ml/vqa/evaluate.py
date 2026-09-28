@@ -1,84 +1,33 @@
 """
-Evaluation harness for RSVQA and VRSBench.
+Evaluate the single-image VQA specialist.
 
-This module does NOT fabricate benchmark numbers. It runs the actual
-model over a (pre-flattened) dataset split and reports the metric
-computed from real predictions.
+Scores a checkpoint on a prepared manifest (see ml.vqa.training.prepare_vrsbench)
+with exact-match accuracy, overall and per question type. For VRSBench the
+`test` split is the official VQA evaluation set (37,409 questions).
 
-Usage (after converting the raw dataset to a flat JSONL manifest — see
-`iter_dataset` docstring):
+    python -m ml.vqa.evaluate --data-root data/vrsbench_vqa --split test
 
-    python -m ml.vqa.evaluate --dataset rsvqa-lr --split test \\
-        --data-root /path/to/RSVQA-LR --out docs/vqa_results.md
-
-    python -m ml.vqa.evaluate --dataset vrsbench --split test \\
-        --data-root /path/to/VRSBench --task vqa --out docs/vqa_results.md
-
-NOTE: This gives a quick exact-match sanity metric. For VRSBench,
-prefer the *official* evaluation scripts (compute_metrics.py /
-eval_vqa_gpt.ipynb / eval_caption_gpt.ipynb from the VRSBench repo) for
-numbers you intend to report — treat this loop as a smoke test, not a
-replacement for the official protocol (Section 32/33 of the project spec).
+Exact match is the right metric for this model, which answers from a fixed
+vocabulary; VRSBench's paper scores open-ended LLM answers with a GPT judge
+instead, so its numbers are not directly comparable.
 """
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
 
-from .inference import VQAModel, ModelRequest
+import torch
+from torch.utils.data import DataLoader
+
+from ml.vqa.config import TrainConfig
+from ml.vqa.inference import DEFAULT_CHECKPOINT
+from ml.vqa.model import VQAModel as CoreVQAModel
+from ml.vqa.training.dataset import VQADataset
+from ml.vqa.training.train import amp_dtype, evaluate
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class EvalExample:
-    image_path: str
-    question: str
-    reference_answer: str
-    modality: str = "optical"
-
-
-def iter_dataset(dataset: str, data_root: Path, split: str) -> Iterator[EvalExample]:
-    """
-    Yields EvalExample records for a supported dataset.
-
-    IMPORTANT: This expects a pre-flattened JSONL manifest at
-    `{data_root}/{split}.jsonl`, one record per line:
-        {"image": "<relative path>", "question": "...", "answer": "...", "modality": "optical"}
-
-    RSVQA and VRSBench each ship their own raw formats; write a small
-    one-off converter per their official documentation (RSVQA project
-    page / VRSBench GitHub) rather than re-parsing raw formats here on
-    every run. Do NOT mix train/test splits when building the manifest —
-    keep the held-out test split untouched (Section 31).
-    """
-    manifest = data_root / f"{split}.jsonl"
-    if not manifest.exists():
-        raise FileNotFoundError(
-            f"Expected a flattened manifest at {manifest}. Convert the raw "
-            f"{dataset} '{split}' split into JSONL lines of "
-            '{"image": ..., "question": ..., "answer": ...} first.'
-        )
-    with manifest.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            yield EvalExample(
-                image_path=str(data_root / rec["image"]),
-                question=rec["question"],
-                reference_answer=rec["answer"],
-                modality=rec.get("modality", "optical"),
-            )
-
-
-def _normalize(text: str) -> str:
-    return " ".join(text.strip().lower().split())
 
 
 def run_eval(
@@ -88,49 +37,32 @@ def run_eval(
     task: str = "vqa",
     limit: Optional[int] = None,
     checkpoint: Optional[str] = None,
+    batch_size: int = 64,
+    num_workers: int = 4,
 ) -> dict:
-    from ml.vqa.config import ModelConfig
-    config = ModelConfig()
-    if checkpoint:
-        config.checkpoint_path = Path(checkpoint)
-    
-    model = VQAModel(config=config)
-    total = 0
-    correct = 0
-    records = []
+    """Accuracy of a checkpoint on `{data_root}/{split}.jsonl`.
 
-    for i, ex in enumerate(iter_dataset(dataset, data_root, split)):
-        if limit is not None and i >= limit:
-            break
-        request = ModelRequest(
-            query=ex.question,
-            images=[ex.image_path],
-            modalities=[ex.modality],
-            task_hint=task,
-        )
-        response = model.predict(request)
-        is_correct = _normalize(response.answer) == _normalize(ex.reference_answer)
-        total += 1
-        correct += int(is_correct)
-        records.append(
-            {
-                "image": ex.image_path,
-                "question": ex.question,
-                "reference": ex.reference_answer,
-                "prediction": response.answer,
-                "confidence": response.confidence,
-                "correct": is_correct,
-            }
-        )
-
-    accuracy = correct / total if total else 0.0
+    Returns {"dataset", "split", "task", "n_examples", "accuracy_exact_match",
+    "per_type": {type: {"count", "accuracy"}}}.
+    """
+    if task != "vqa":
+        raise ValueError("The single-image VQA model answers questions only (task='vqa').")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = CoreVQAModel.from_checkpoint(checkpoint or DEFAULT_CHECKPOINT, device=device)
+    cfg = TrainConfig(image_size=getattr(model, "image_size", 256), augment=False)
+    ds = VQADataset(Path(data_root), split, model.answers_vocab, model.tokenizer, cfg,
+                    max_question_length=model.config.max_question_length)
+    if limit is not None:
+        ds.samples = ds.samples[:limit]
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    metrics = evaluate(model, loader, device, amp_dtype(device))
     return {
         "dataset": dataset,
         "split": split,
         "task": task,
-        "n_examples": total,
-        "accuracy_exact_match": accuracy,
-        "records": records,
+        "n_examples": metrics["all"]["count"],
+        "accuracy_exact_match": metrics["all"]["accuracy"],
+        "per_type": {k: v for k, v in metrics.items() if k != "all"},
     }
 
 
@@ -140,38 +72,31 @@ def write_report(results: dict, out_path: Path) -> None:
         f.write(f"\n## {results['dataset']} ({results['split']}, task={results['task']})\n\n")
         f.write(f"- Examples evaluated: {results['n_examples']}\n")
         f.write(f"- Exact-match accuracy: {results['accuracy_exact_match']:.4f}\n")
-        f.write(
-            "- Metric note: exact-match string accuracy is a coarse proxy "
-            "computed by this script. For VRSBench, prefer the official "
-            "GPT-based VQA/caption evaluation notebooks for the number you "
-            "actually report.\n"
-        )
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Run RSVQA/VRSBench evaluation")
-    p.add_argument("--dataset", required=True, choices=["rsvqa-lr", "rsvqa-hr", "vrsbench"])
-    p.add_argument("--split", default="test")
-    p.add_argument("--data-root", required=True, type=Path)
-    p.add_argument("--task", default="vqa", choices=["vqa", "captioning"])
-    p.add_argument("--checkpoint", type=str, default=None, help="Path to custom VQA checkpoint")
-    p.add_argument(
-        "--limit", type=int, default=None,
-        help="Evaluate only the first N examples (smoke test before a full run)",
-    )
-    p.add_argument("--out", type=Path, default=Path("docs/vqa_results.md"))
-    return p
+        if results.get("per_type"):
+            f.write("\n| Question type | Count | Accuracy |\n|---|---|---|\n")
+            for name, m in sorted(results["per_type"].items(), key=lambda kv: -kv[1]["count"]):
+                f.write(f"| {name} | {m['count']} | {m['accuracy']:.1%} |\n")
 
 
 def main(argv=None) -> int:
-    logging.basicConfig(level=logging.INFO)
-    args = _build_arg_parser().parse_args(argv)
-    results = run_eval(
-        args.dataset, args.data_root, args.split, 
-        task=args.task, limit=args.limit, checkpoint=args.checkpoint
-    )
-    write_report(results, args.out)
-    logger.info("Wrote evaluation report to %s", args.out)
+    p = argparse.ArgumentParser(description="Evaluate the single-image VQA model")
+    p.add_argument("--dataset", default="vrsbench")
+    p.add_argument("--data-root", type=Path, default=Path("data/vrsbench_vqa"))
+    p.add_argument("--split", default="test")
+    p.add_argument("--checkpoint", default=None)
+    p.add_argument("--limit", type=int, default=None, help="Evaluate only the first N questions")
+    p.add_argument("--out", type=Path, default=None, help="Append a Markdown report here")
+    args = p.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    results = run_eval(args.dataset, args.data_root, args.split, limit=args.limit,
+                       checkpoint=args.checkpoint)
+    print(f"{args.dataset} {args.split}: {results['n_examples']} questions, "
+          f"exact-match accuracy {results['accuracy_exact_match']:.1%}")
+    for name, m in sorted(results["per_type"].items(), key=lambda kv: -kv[1]["count"]):
+        print(f"  {name:<20}{m['count']:>7}{m['accuracy']:>10.1%}")
+    if args.out:
+        write_report(results, args.out)
     return 0
 
 

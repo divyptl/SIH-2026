@@ -1,41 +1,35 @@
 """
-Unit tests for ml.vqa.
+Unit tests for ml.vqa (single-image VQA).
 
-These tests use a lightweight fake backend so they run without a GPU,
-MiniGPT-v2, or the SkyEyeGPT checkpoint. Once Phase 1 (real SkyEyeGPT
-inference) is confirmed working, add separate integration tests that
-exercise SkyEyeGPTModel directly against real images — do not weaken
-these unit tests to require a GPU.
+They use a tiny, untrained model (ResNet-18, no pretrained weights), so they
+run on CPU without a trained checkpoint.
 
 Run with:
     python -m unittest ml.vqa.test_vqa -v
 """
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+import torch
 from PIL import Image
 
-from .inference import VQAModel, ModelRequest, ModelResponse
-from .model import BaseVQAModel
+from .config import ModelConfig
+from .inference import ModelRequest, ModelResponse, VQAModel
+from .model import VQAModel as CoreVQAModel
+
+ANSWERS = ["yes", "no", "2"]
+WORDS = ["is", "there", "a", "water", "body", "in", "the", "image", "?", "how", "many", "ships"]
 
 
-class FakeBackend(BaseVQAModel):
-    """Deterministic stand-in for SkyEyeGPTModel."""
-
-    def answer(self, image, question):
-        return f"FAKE_ANSWER: {question}"
-
-    def caption(self, image):
-        return "FAKE_CAPTION: a remote sensing scene"
-
-    def generate(self, image, prompt):
-        return f"FAKE_GEN: {prompt}"
-
-    def generation_score(self):
-        return None
+def _tiny_core() -> CoreVQAModel:
+    torch.manual_seed(0)
+    config = ModelConfig(backbone="resnet18", pretrained=False, num_classes=len(ANSWERS),
+                         vocab_size=len(WORDS) + 4)
+    return CoreVQAModel(config, answers=ANSWERS, question_vocab=WORDS)
 
 
 def _make_rgb_image(path: Path, size=(64, 64)) -> Path:
@@ -49,7 +43,7 @@ class VQAModelTests(unittest.TestCase):
         self.tmp_path = Path(self.tmpdir.name)
         self.rgb_path = _make_rgb_image(self.tmp_path / "sample.png")
         self.jpg_path = _make_rgb_image(self.tmp_path / "sample.jpg")
-        self.model = VQAModel(backend=FakeBackend())
+        self.model = VQAModel(backend=_tiny_core(), device="cpu")
 
     def tearDown(self):
         self.tmpdir.cleanup()
@@ -64,22 +58,20 @@ class VQAModelTests(unittest.TestCase):
         base.update(overrides)
         return ModelRequest(**base)
 
-    # 1. RGB image + VQA
+    # 1. RGB image + VQA: the answer comes from the model's vocabulary
     def test_rgb_vqa(self):
         resp = self.model.predict(self._request())
         self.assertIsInstance(resp, ModelResponse)
-        self.assertIn("FAKE_ANSWER", resp.answer)
-        self.assertEqual(resp.model_name, "SkyEyeGPT-VQA")
+        self.assertIn(resp.answer, ANSWERS)
+        self.assertEqual(resp.model_name, "SatQuery-VQA")
 
-    # 2. RGB image + captioning
-    def test_rgb_captioning(self):
+    # 2. Captioning is refused: a classifier cannot write captions
+    def test_captioning_not_supported(self):
         resp = self.model.predict(self._request(task_hint="captioning", query=""))
-        self.assertIn("FAKE_CAPTION", resp.answer)
-        self.assertEqual(resp.model_name, "SkyEyeGPT-Captioning")
+        self.assertTrue(resp.answer.startswith("ERROR"))
+        self.assertIn("Captioning", resp.answer)
 
-    # 3. GeoTIFF + VQA (needs a real fixture + rasterio; kept as an
-    #    explicit skip so the suite documents what's still missing
-    #    instead of silently omitting the case).
+    # 3. GeoTIFF + VQA (needs a real fixture + rasterio)
     def test_geotiff_vqa_skipped_without_fixture(self):
         self.skipTest(
             "Requires a real GeoTIFF fixture + rasterio. Add one under "
@@ -130,6 +122,58 @@ class VQAModelTests(unittest.TestCase):
         self.assertIsInstance(resp.execution_time_ms, float)
         self.assertGreaterEqual(resp.confidence, 0.0)
         self.assertLessEqual(resp.confidence, 1.0)
+
+    # 11. answer(): best-first top-k whose first entry is the answer
+    def test_answer_top_k(self):
+        result = self.model.answer(Image.open(self.rgb_path), "How many ships?", top_k=3)
+        probs = [p for _, p in result["top"]]
+        self.assertEqual(probs, sorted(probs, reverse=True))
+        self.assertEqual(result["top"][0], (result["answer"], result["confidence"]))
+        self.assertAlmostEqual(sum(probs), 1.0, places=4)
+
+    # 12. Checkpoint round trip keeps vocabularies and weights
+    def test_checkpoint_round_trip(self):
+        core = _tiny_core().eval()
+        path = self.tmp_path / "vqa.pt"
+        torch.save(core.checkpoint_dict(train_config={"image_size": 64}), path)
+        loaded = CoreVQAModel.from_checkpoint(str(path))
+        self.assertEqual(loaded.answers_vocab, ANSWERS)
+        self.assertEqual(loaded.tokenizer.vocab, core.tokenizer.vocab)
+        self.assertEqual(loaded.image_size, 64)
+        image = torch.rand(1, 3, 64, 64)
+        with torch.no_grad():
+            a = core(image=image, question_text="how many ships ?")["answer_logits"]
+            b = loaded(image=image, question_text="how many ships ?")["answer_logits"]
+        self.assertTrue(torch.allclose(a, b))
+
+    # 13. A Change-VQA checkpoint is refused, not silently loaded
+    def test_change_vqa_checkpoint_refused(self):
+        path = self.tmp_path / "c_vqa.pt"
+        torch.save({"model": {"difference_module.proj.weight": torch.zeros(1)}}, path)
+        with self.assertRaises(ValueError) as ctx:
+            CoreVQAModel.from_checkpoint(str(path))
+        self.assertIn("Change-VQA", str(ctx.exception))
+
+
+class VQADatasetTests(unittest.TestCase):
+    # 14. Answers outside the vocabulary are dropped for training, kept (as
+    #     unknown) for evaluation — never relabelled as another answer
+    def test_unknown_answers(self):
+        from .training.dataset import UNKNOWN_ANSWER, VQADataset
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _make_rgb_image(root / "a.png")
+            rows = [{"image": "a.png", "question": "is there a ship ?", "answer": "yes"},
+                    {"image": "a.png", "question": "what colour ?", "answer": "turquoise"}]
+            (root / "train.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+            core = _tiny_core()
+            train = VQADataset(root, "train", ANSWERS, core.tokenizer, drop_unknown_answers=True)
+            full = VQADataset(root, "train", ANSWERS, core.tokenizer)
+            self.assertEqual(len(train), 1)
+            self.assertEqual(len(full), 2)
+            self.assertEqual(int(full[1]["answer_label"]), UNKNOWN_ANSWER)
+            self.assertEqual(int(full[0]["answer_label"]), ANSWERS.index("yes"))
 
 
 if __name__ == "__main__":

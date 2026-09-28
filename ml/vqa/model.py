@@ -296,12 +296,38 @@ class VQAHead(nn.Module):
 
 # ── Full End-to-End VQA Model ────────────────────────────
 
-class VQAModel(nn.Module):
-    """End-to-end Vision Encoder + VLM Head for single-image VQA."""
+# Marks a checkpoint as this single-image model, so it is never confused with a
+# Change-VQA checkpoint (ml.C_VQA), whose files look similar.
+CHECKPOINT_TASK = "single_image_vqa"
 
-    def __init__(self, config: ModelConfig | None = None) -> None:
+# Parameters that only exist in the two-image Change-VQA model.
+_CHANGE_VQA_KEYS = ("difference_module.", "mask_head.")
+
+
+class VQAModel(nn.Module):
+    """End-to-end Vision Encoder + VLM Head for single-image VQA.
+
+    Args:
+        config: Architecture hyperparameters.
+        answers: The answer vocabulary, one class per answer (built from the
+            training data by ml.vqa.training.prepare_vrsbench). Defaults to the
+            small built-in CANONICAL_ANSWERS list.
+        question_vocab: Question words known to the tokenizer (special tokens
+            are added in front). Defaults to the built-in tokenizer vocabulary.
+    """
+
+    def __init__(
+        self,
+        config: ModelConfig | None = None,
+        answers: list[str] | None = None,
+        question_vocab: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.config = config or ModelConfig()
+        if answers is not None and len(answers) != self.config.num_classes:
+            raise ValueError(
+                f"config.num_classes={self.config.num_classes} but {len(answers)} answers given"
+            )
 
         # 1. Vision Backbone
         self.backbone = VisionBackbone(
@@ -311,7 +337,17 @@ class VQAModel(nn.Module):
         )
 
         # 2. Text Tokenizer & Encoder
-        self.tokenizer = SimpleTokenizer()
+        if question_vocab is None:
+            self.tokenizer = SimpleTokenizer()
+        else:
+            specials = [SimpleTokenizer.PAD_TOKEN, SimpleTokenizer.UNK_TOKEN,
+                        SimpleTokenizer.SOS_TOKEN, SimpleTokenizer.EOS_TOKEN]
+            self.tokenizer = SimpleTokenizer(specials + list(question_vocab))
+        if len(self.tokenizer.vocab) > self.config.vocab_size:
+            raise ValueError(
+                f"Tokenizer has {len(self.tokenizer.vocab)} words but config.vocab_size is "
+                f"{self.config.vocab_size}"
+            )
         self.text_encoder = TextEncoder(
             vocab_size=self.config.vocab_size,
             embed_dim=self.config.text_embed_dim,
@@ -342,10 +378,13 @@ class VQAModel(nn.Module):
             dropout=self.config.dropout,
         )
 
-        # Canonical vocabulary of answer labels
-        self.answers_vocab = CANONICAL_ANSWERS.copy()
-        while len(self.answers_vocab) < self.config.num_classes:
-            self.answers_vocab.append(f"answer_category_{len(self.answers_vocab)}")
+        # Answer label for each output class
+        if answers is not None:
+            self.answers_vocab = list(answers)
+        else:
+            self.answers_vocab = CANONICAL_ANSWERS.copy()
+            while len(self.answers_vocab) < self.config.num_classes:
+                self.answers_vocab.append(f"answer_category_{len(self.answers_vocab)}")
 
     def forward(
         self,
@@ -413,13 +452,48 @@ class VQAModel(nn.Module):
             "predicted_answer_text": pred_answers,
         }
 
+    def checkpoint_dict(self, **extra: Any) -> dict[str, Any]:
+        """Everything needed to rebuild this model, for torch.save."""
+        from dataclasses import asdict
+
+        state = self.state_dict()
+        return {
+            "task": CHECKPOINT_TASK,
+            "model_state_dict": state,
+            "config": asdict(self.config),
+            "answers": self.answers_vocab,
+            # Words after the four special tokens, which the constructor re-adds
+            "question_vocab": self.tokenizer.vocab[4:],
+            **extra,
+        }
+
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, device: str = "cpu") -> "VQAModel":
-        """Load model from a saved checkpoint."""
-        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        config = ModelConfig(**checkpoint.get("config", {}))
-        model = cls(config)
-        model.load_state_dict(checkpoint["model_state_dict"])
+        """Load a single-image VQA checkpoint written by ml.vqa.training.train.
+
+        Raises ValueError for a Change-VQA (two-image) checkpoint, which belongs
+        to ml.C_VQA and cannot answer single-image questions.
+        """
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        state = checkpoint.get("model_state_dict") or checkpoint.get("model") or {}
+        if checkpoint.get("task") != CHECKPOINT_TASK:
+            if any(k.startswith(_CHANGE_VQA_KEYS) for k in state):
+                raise ValueError(
+                    f"{checkpoint_path} is a Change-VQA (two-image) checkpoint. Load it with "
+                    "ml.C_VQA.inference.ChangeVQAModel; single-image VQA needs a checkpoint "
+                    "from ml.vqa.training.train."
+                )
+            raise ValueError(
+                f"{checkpoint_path} is not a single-image VQA checkpoint "
+                f"(expected task={CHECKPOINT_TASK!r}, found {checkpoint.get('task')!r})."
+            )
+        config = ModelConfig(**checkpoint["config"])
+        config.pretrained = False          # weights come from the checkpoint
+        model = cls(config, answers=checkpoint["answers"],
+                    question_vocab=checkpoint["question_vocab"])
+        model.load_state_dict(state)
+        # Resolution the model was trained at; inference must resize to it.
+        model.image_size = int(checkpoint.get("train_config", {}).get("image_size", 256))
         model.to(device)
         model.eval()
         return model

@@ -1,0 +1,11 @@
+Device cuda (torch.bfloat16) | backbone convnext_tiny | image 256px | 1000 answers | 1443 words
+train 79,163 (answer in vocabulary) | dev 4,340
+  [1][200/1236] loss 6.5017
+  [1][400/1236] loss 5.8794
+  [1][600/1236] loss 5.3974
+  [1][800/1236] loss 5.0195
+  [1][1000/1236] loss 4.7039
+  [1][1200/1236] loss 4.4426
+Epoch 1/12  loss 4.4016  dev acc 43.96%  [278s]  * best
+  [2][200/1236] loss 2.9016
+  [2][400/1236] loss 2.8316

@@ -1,118 +1,112 @@
 """
-PyTorch Dataset for VQA.
+PyTorch Dataset for single-image VQA.
 
-Loads image-question-answer triples from a flattened JSONL manifest.
+Reads the JSONL manifests written by ml.vqa.training.prepare_vrsbench.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
-from PIL import Image
 
 from ml.vqa.config import TrainConfig
-from ml.vqa.model import SimpleTokenizer, CANONICAL_ANSWERS
+from ml.vqa.model import SimpleTokenizer
 from ml.vqa.preprocessing import load_image
+
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
+# Answer label for a question whose answer is not in the vocabulary. Such
+# questions are dropped from training and scored as wrong in evaluation.
+UNKNOWN_ANSWER = -1
+
+
+def eval_transform(image_size: int) -> transforms.Compose:
+    """The preprocessing used at evaluation and inference time."""
+    return transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ])
 
 
 class VQADataset(Dataset):
     """
-    Dataset for single-image VQA.
+    Single-image VQA samples from `{data_root}/{split}.jsonl`, one per line:
+        {"image": "<path relative to data_root>", "question": "...", "answer": "...",
+         "type": "<question type or null>", "modality": "optical"}
 
-    Expects a JSONL manifest at `{data_root}/{split}.jsonl` where each line is:
-    {"image": "path/to/img.jpg", "question": "What is this?", "answer": "road", "modality": "optical"}
+    Args:
+        data_root: Directory holding the manifests.
+        split: Manifest name ('train', 'dev', 'test').
+        answers: Answer vocabulary; index = class label.
+        tokenizer: Question tokenizer (the model's).
+        config: Image size, augmentation, question length.
+        drop_unknown_answers: Skip questions whose answer is not in `answers`
+            (for training; evaluation keeps them and counts them as wrong).
     """
 
-    def __init__(self, data_root: str | Path, split: str, config: TrainConfig | None = None) -> None:
+    def __init__(
+        self,
+        data_root: str | Path,
+        split: str,
+        answers: list[str],
+        tokenizer: SimpleTokenizer,
+        config: TrainConfig | None = None,
+        drop_unknown_answers: bool = False,
+        max_question_length: int = 32,
+    ) -> None:
         super().__init__()
         self.data_root = Path(data_root)
         self.split = split
         self.config = config or TrainConfig()
+        self.tokenizer = tokenizer
+        self.max_question_length = max_question_length
+        self.answer_to_idx = {a: i for i, a in enumerate(answers)}
 
         manifest = self.data_root / f"{split}.jsonl"
         if not manifest.exists():
-            raise FileNotFoundError(f"Manifest not found: {manifest}")
-
-        self.samples = []
+            raise FileNotFoundError(
+                f"Manifest not found: {manifest}. Run `python -m ml.vqa.training.prepare_vrsbench`."
+            )
         with manifest.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                self.samples.append(json.loads(line))
+            samples = [json.loads(line) for line in f if line.strip()]
+        if drop_unknown_answers:
+            samples = [s for s in samples if s["answer"] in self.answer_to_idx]
+        self.samples = samples
 
-        self.tokenizer = SimpleTokenizer()
-
-        # Build answer vocabulary mapping
-        self.answer_to_idx = {ans: i for i, ans in enumerate(CANONICAL_ANSWERS)}
-
-        # Image transforms
-        if self.split == "train" and self.config.augment:
+        # No flips: they would turn "left" answers into wrong labels.
+        if split == "train" and self.config.augment:
             self.transform = transforms.Compose([
                 transforms.Resize((self.config.image_size, self.config.image_size)),
-                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
             ])
         else:
-            self.transform = transforms.Compose([
-                transforms.Resize((self.config.image_size, self.config.image_size)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])
+            self.transform = eval_transform(self.config.image_size)
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    def _get_answer_label(self, answer: str) -> int:
-        """Map a string answer to a class index."""
-        clean_ans = answer.strip().lower()
-        if clean_ans in self.answer_to_idx:
-            return self.answer_to_idx[clean_ans]
-        return 0  # Default to first class if unknown/unmapped (could also map to a specific "unknown" class)
-
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def __getitem__(self, idx: int) -> dict[str, Any]:
         record = self.samples[idx]
-        image_path = self.data_root / record["image"]
-        
-        # Kaggle workaround: If Images.zip extracts into Images/Images/..., gracefully fall back
-        if not image_path.exists():
-            fallback_path = self.data_root / "Images" / record["image"]
-            if fallback_path.exists():
-                image_path = fallback_path
-        
-        # Load image (load_image returns PIL Image)
-        img = load_image(image_path, modality=record.get("modality", "optical"))
-        if not isinstance(img, Image.Image):
-            # In case preprocessing returns a numpy array for SAR/multispectral
-            if hasattr(img, "astype"):
-                import numpy as np
-                if img.dtype != np.uint8:
-                    img = (img * 255).astype(np.uint8)
-                img = Image.fromarray(img)
-            else:
-                img = img.convert("RGB")
+        image = load_image(self.data_root / record["image"], modality=record.get("modality", "optical"))
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(image)
+        image = image.convert("RGB")
 
-        # Apply transforms
-        img_tensor = self.transform(img)
-
-        # Tokenize question
-        question = record["question"]
-        q_ids, _ = self.tokenizer.encode(question, max_length=32)
-        q_tensor = torch.tensor(q_ids, dtype=torch.long)
-
-        # Answer label
-        ans_label = self._get_answer_label(record["answer"])
-        ans_tensor = torch.tensor(ans_label, dtype=torch.long)
-
+        q_ids, _ = self.tokenizer.encode(record["question"], max_length=self.max_question_length)
         return {
-            "image": img_tensor,
-            "question_ids": q_tensor,
-            "answer_label": ans_tensor,
-            "question_text": question,
-            "answer_text": record["answer"],
+            "image": self.transform(image),
+            "question_ids": torch.tensor(q_ids, dtype=torch.long),
+            "answer_label": torch.tensor(
+                self.answer_to_idx.get(record["answer"], UNKNOWN_ANSWER), dtype=torch.long,
+            ),
+            "index": idx,
         }

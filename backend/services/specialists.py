@@ -32,6 +32,10 @@ T = TypeVar("T")
 
 # Grounding returns the re-ranker's pick first, then other candidates above threshold.
 MAX_GROUNDING_BOXES = 5
+# Single-image VQA shows this many runner-up answers as evidence.
+VQA_ALTERNATIVES = 3
+# Below this confidence the VQA answer is flagged as uncertain.
+VQA_LOW_CONFIDENCE = 0.4
 # Longest edge of the change-mask overlay; matches the preview it is drawn on.
 MASK_OVERLAY_EDGE_PX = 768
 
@@ -95,6 +99,13 @@ def _load_grounding():
     )
 
 
+def _load_vqa():
+    from ml.vqa.inference import VQAModel
+
+    settings = get_settings()
+    return VQAModel.from_checkpoint(settings.vqa_checkpoint, device=settings.specialist_device)
+
+
 def _load_change_vqa():
     from ml.C_VQA.inference import ChangeVQAModel
 
@@ -114,6 +125,7 @@ def _load_fusion():
 
 
 _grounding = _Lazy(_load_grounding)
+_vqa = _Lazy(_load_vqa)
 _change_vqa = _Lazy(_load_change_vqa)
 _fusion = _Lazy(_load_fusion)
 
@@ -128,6 +140,7 @@ def preload(tasks: set[str]) -> None:
     """Load the specialists for ``tasks`` now, so no request waits on a model load."""
     loaders = {
         "grounding": _grounding,
+        "vqa": _vqa,
         "change_vqa": _change_vqa,
         "change_description": _change_vqa,
         "fusion": _fusion,
@@ -181,6 +194,43 @@ def run_grounding(query: str, images: list[PreparedImage]) -> dict[str, Any]:
     if others:
         answer += f" {others} other candidate region(s) scored above the detection threshold."
     return {"answer": answer, "confidence": detections[0]["score"], "evidence": evidence}
+
+
+def run_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
+    """Answer a factual question about one image with the single-image VQA model.
+
+    The model picks its answer from a fixed vocabulary; the runner-up answers
+    are returned as evidence so an uncertain answer is visible as such.
+    Two-image questions never reach this runner: the registry only routes
+    single images to VQA, and image pairs go to Change-VQA or fusion.
+    """
+    if len(images) != 1:
+        raise ValueError(f"Single-image VQA takes exactly one image, got {len(images)}")
+    result = _vqa.get().answer(_pil(images[0]), query, top_k=VQA_ALTERNATIVES + 1)
+    answer = result["answer"]
+    confidence = result["confidence"]
+
+    alternatives = result["top"][1:]
+    evidence: list[dict[str, Any]] = []
+    if alternatives:
+        evidence.append({
+            "description": "Other likely answers: "
+            + ", ".join(f"{a} ({p:.0%})" for a, p in alternatives) + ".",
+            "image_index": 0,
+        })
+    if confidence < VQA_LOW_CONFIDENCE:
+        evidence.append({
+            "description": (
+                f"The model is unsure ({confidence:.0%} confidence); treat this answer "
+                "with caution and check it against the image."
+            ),
+            "image_index": 0,
+        })
+    return {
+        "answer": f"{answer[:1].upper()}{answer[1:]}.",
+        "confidence": confidence,
+        "evidence": evidence,
+    }
 
 
 def change_vqa_gsd_range() -> tuple[float, float]:

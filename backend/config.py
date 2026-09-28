@@ -106,6 +106,11 @@ class Settings:
         )
         # Trained on LEVIR-CD (0.5 m aerial, building change): expect little signal
         # from coarse imagery such as 10 m Sentinel-2 or from non-building change.
+        # Single-image VQA (ml.vqa): answers factual questions about one image by
+        # choosing from the answer vocabulary it was trained on (VRSBench).
+        self.vqa_checkpoint: Path | None = _checkpoint(
+            "VQA_CHECKPOINT", "checkpoints/vqa/best.pt"
+        )
         self.change_vqa_checkpoint: Path | None = _checkpoint(
             "CHANGE_VQA_CHECKPOINT", "checkpoints/c_vqa_best.pt"
         )
