@@ -53,7 +53,7 @@ VALID_TASKS: set[str] = set(TOOL_REGISTRY)
 # A question about one image that asks to locate something goes to grounding.
 # Matched on the English query (after translation), as whole words.
 _GROUNDING_WORDS = re.compile(
-    r"\b(where|locate|locating|find|show|highlight|point out|mark|detect|"
+    r"\b(where|locate|locating|find|finding|show|highlight|point out|mark|detect|"
     r"box|which part|position of|location of)\b",
     re.IGNORECASE,
 )
