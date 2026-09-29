@@ -155,45 +155,128 @@ def preload(tasks: set[str]) -> None:
 # --- Runners ---------------------------------------------------------------------
 
 
+def box_position(x_min: float, y_min: float, x_max: float, y_max: float) -> str:
+    """Where a normalised box sits in the image, as 'top-left', 'right', 'centre', ...
+
+    Image-relative on purpose: an upload's orientation is unknown, so compass
+    directions would be guesses.
+    """
+    cx, cy = (x_min + x_max) / 2, (y_min + y_max) / 2
+    vertical = "top" if cy < 1 / 3 else "bottom" if cy > 2 / 3 else ""
+    horizontal = "left" if cx < 1 / 3 else "right" if cx > 2 / 3 else ""
+    if vertical and horizontal:
+        return f"{vertical}-{horizontal}"
+    return vertical or horizontal or "centre"
+
+
+def position_phrase(position: str) -> str:
+    """'top-left' -> 'in the top-left corner'; 'left' -> 'on the left side'."""
+    if "-" in position:
+        return f"in the {position} corner"
+    return {
+        "top": "near the top",
+        "bottom": "near the bottom",
+        "left": "on the left side",
+        "right": "on the right side",
+    }.get(position, "in the centre")
+
+
+def size_phrase(share: float) -> str:
+    """How much of the image a box covers, in words."""
+    if share < 0.01:
+        return "a very small area"
+    if share < 0.05:
+        return "a small area"
+    if share < 0.25:
+        return "a medium-sized area"
+    return "a large part of the image"
+
+
+def certainty_phrase(score: float) -> str:
+    """The grounding score in words a non-expert can use."""
+    if score >= 0.7:
+        return "confident"
+    if score >= 0.4:
+        return "fairly confident"
+    return "not very confident"
+
+
 def run_grounding(query: str, images: list[PreparedImage]) -> dict[str, Any]:
-    """Localise the region the query refers to with the fine-tuned GroundingDINO."""
+    """Localise the region the query refers to with the fine-tuned GroundingDINO.
+
+    Besides the answer and evidence, the payload carries ``narration_facts``:
+    the boxes with their position, size and score, which the controller hands
+    to the narrator (agent/narration.py) as the only facts it may put into words.
+    """
     image = _pil(images[0]).convert("RGB")
     width, height = image.size
     detections = _grounding.get().ground(image, query)[:MAX_GROUNDING_BOXES]
+    if not detections:
+        return {
+            "answer": f'No area in the image clearly matches "{query.strip()}".',
+            "confidence": 0.0,
+            "evidence": [],
+        }
 
-    evidence = []
+    evidence: list[dict[str, Any]] = []
+    regions: list[dict[str, Any]] = []
     for rank, detection in enumerate(detections):
         x_min, y_min, x_max, y_max = detection["box"]
+        box = (
+            max(0.0, x_min / width), max(0.0, y_min / height),
+            min(1.0, x_max / width), min(1.0, y_max / height),
+        )
+        position = box_position(*box)
+        share = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+        score = detection["score"]
+        place = position_phrase(position)
+        number = rank + 1
+        role = "Best match" if rank == 0 else "Other possible match"
         label = detection["label"]
         evidence.append(
             {
                 "description": (
-                    "Best match for the query." if rank == 0 else "Other candidate region."
+                    f"{role}, {place}, covering {size_phrase(share)}."
                 ),
                 # With a re-ranker the label is the whole query; only keep short phrases.
                 "label": label if label and label.lower() != query.lower().strip() else None,
-                "confidence": detection["score"],
+                "confidence": score,
                 "image_index": 0,
-                "box": {
-                    "x_min": max(0.0, x_min / width),
-                    "y_min": max(0.0, y_min / height),
-                    "x_max": min(1.0, x_max / width),
-                    "y_max": min(1.0, y_max / height),
-                },
+                "box": {"x_min": box[0], "y_min": box[1], "x_max": box[2], "y_max": box[3]},
+            }
+        )
+        regions.append(
+            {
+                "number": number,
+                "evidence_index": len(evidence) - 1,
+                "box": list(box),
+                "position": position,
+                "place": place,
+                "share": share,
+                "size": size_phrase(share),
+                "confidence": score,
+                "certainty": certainty_phrase(score),
+                # Appended by the controller after the narrator's sentence for the box.
+                "measure": f"{role}, {place}, covering {size_phrase(share)}.",
             }
         )
 
-    if not detections:
-        return {
-            "answer": "The grounding model found no region matching the query.",
-            "confidence": 0.0,
-            "evidence": [],
-        }
-    others = len(detections) - 1
-    answer = "The region the query refers to is marked as box 1."
-    if others:
-        answer += f" {others} other candidate region(s) scored above the detection threshold."
-    return {"answer": answer, "confidence": detections[0]["score"], "evidence": evidence}
+    best = regions[0]
+    answer = (
+        f'Box 1 marks the area that best matches "{query.strip()}", {best["place"]} '
+        f'of the image. The model is {best["certainty"]} about this match.'
+    )
+    others = len(regions) - 1
+    if others == 1:
+        answer += " One other possible match is marked as box 2."
+    elif others > 1:
+        answer += f" {others} other possible matches are marked as boxes 2 to {others + 1}."
+    return {
+        "answer": answer,
+        "confidence": best["confidence"],
+        "evidence": evidence,
+        "narration_facts": {"kind": "grounding", "query": query.strip(), "regions": regions},
+    }
 
 
 def run_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:

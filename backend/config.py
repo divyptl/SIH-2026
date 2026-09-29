@@ -122,10 +122,11 @@ class Settings:
         # Load the specialists at startup instead of on their first request.
         self.specialist_preload: bool = _flag("SPECIALIST_PRELOAD", "false")
 
-        # Plain-language narration of the Change-VQA result (agent/narration.py):
-        # the VLM rewords the specialist's regions and measurements for non-expert
-        # readers, and is rejected if it adds a region, number or place of its own.
-        # Off by default: answers are the specialists' own wording.
+        # Plain-language narration of Change-VQA and grounding results
+        # (agent/narration.py): the VLM rewords the specialist's regions/boxes and
+        # measurements for non-expert readers, and is rejected if it adds a region,
+        # number or place of its own. Off by default: answers are then the
+        # specialists' own (plain but terse) wording.
         self.narration_enabled: bool = _flag("NARRATION_ENABLED", "false")
         self.narration_model: str = os.getenv("OPENROUTER_NARRATION_MODEL", self.vision_model)
 

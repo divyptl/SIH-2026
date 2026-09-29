@@ -1,4 +1,4 @@
-"""Plain-language narration of a Change-VQA result.
+"""Plain-language narration of a Change-VQA or grounding result.
 
 The fine-tuned change model produces every fact: which regions changed, how
 much, where, and what the change is. Its own wording ("bare ground to water",
@@ -13,6 +13,14 @@ then checked, and discarded in favour of the model's own text, if it
 - places something in a direction the model did not report.
 It can still choose words the model would not ("sandbank", "river"): that is
 the point of the step, and it only ever applies them to the model's regions.
+
+Grounding results (facts with ``kind == "grounding"``) get the same treatment on
+one image: the VLM is shown the grounding model's boxes, numbered, and says in
+plain words what each box shows and how sure the model is. Its reply is
+discarded if it describes a box the model did not return, writes a number the
+model did not produce (digits or words), places something on a side of the
+image where the model put no box, uses compass directions (the image's
+orientation is unknown), or uses technical jargon.
 """
 
 from __future__ import annotations
@@ -291,15 +299,197 @@ async def narrate(
     OpenRouterError when the call itself fails.
     """
     regions = facts["regions"]
-    text, usage = await client.complete(
-        model=model,
-        system_prompt=SYSTEM_PROMPT,
-        user_text=facts_text(query, facts),
-        image_data_uris=[annotate(images[0], regions), annotate(images[1], regions)],
-        json_object=True,
-        temperature=0.2,
-        max_tokens=900,
-    )
-    narration = check(parse_json_object(text), facts)
+    if facts.get("kind") == "grounding":
+        text, usage = await client.complete(
+            model=model,
+            system_prompt=GROUNDING_SYSTEM_PROMPT,
+            user_text=grounding_facts_text(query, facts),
+            image_data_uris=[annotate(images[0], regions)],
+            json_object=True,
+            temperature=0.2,
+            max_tokens=700,
+        )
+        narration = check_grounding(parse_json_object(text), facts)
+    else:
+        text, usage = await client.complete(
+            model=model,
+            system_prompt=SYSTEM_PROMPT,
+            user_text=facts_text(query, facts),
+            image_data_uris=[annotate(images[0], regions), annotate(images[1], regions)],
+            json_object=True,
+            temperature=0.2,
+            max_tokens=900,
+        )
+        narration = check(parse_json_object(text), facts)
     narration.usage = usage
     return narration
+
+
+# ── Grounding ────────────────────────────────────────────────────────────────
+
+GROUNDING_SYSTEM_PROMPT = """You explain the result of an object-finding model on a satellite or aerial image, in \
+plain language, for people with no technical background: farmers, local officials, \
+relief workers, journalists.
+
+A fine-tuned model was asked to find what the user described. It marked the area it \
+thinks matches best as yellow box 1, and possibly other, less likely matches as boxes \
+2, 3 and so on. Your only job is to tell the user, in simple words, what it found.
+
+Rules -- follow all of them:
+1. Talk only about the numbered boxes listed under FACTS. Never mention, count or \
+describe any other object or area as something the model found.
+2. Look inside each numbered box and say in everyday words what it shows, for example \
+"a large white ship", "a football field", "a row of parked cars". If box 1 does not \
+look like what the user asked for, say plainly that the match may be wrong. Never say \
+something is in a box if you cannot see it there.
+3. Every number you write must come from FACTS. Do not count objects, and do not add \
+sizes, distances or percentages of your own. Words like "small" or "most of the \
+picture" are fine.
+4. For locations use only the position given for each box in FACTS (left, right, top, \
+bottom, centre). Never use compass directions (north, south, east, west): which way \
+the image faces is unknown. Do not name the place.
+5. Say how sure the model is using the words given in FACTS ("confident", "fairly \
+confident", "not very confident").
+6. Plain language, short sentences. Never use these words: bounding box, detection, \
+threshold, score, confidence score, probability, pixel, model output, candidate, \
+re-ranker, IoU, logit.
+
+Respond with a single JSON object and nothing else:
+{"summary": "<2 or 3 short sentences: what was found for the user's request, where, and how sure the model is>",
+ "boxes": [{"number": <a box number from FACTS>,
+            "description": "<one short sentence on what this box shows, in plain words>"}]}"""
+
+# Image-side words a reader could use, mapped to the box position they imply.
+_SIDE_WORDS = {
+    "left": "left", "leftmost": "left",
+    "right": "right", "rightmost": "right",
+    "top": "top", "upper": "top", "topmost": "top",
+    "bottom": "bottom", "lower": "bottom", "bottommost": "bottom",
+}
+_COMPASS_WORDS = {
+    "north", "south", "east", "west", "northern", "southern", "eastern", "western",
+    "northeast", "northwest", "southeast", "southwest",
+    "northeastern", "northwestern", "southeastern", "southwestern",
+}
+_JARGON = (
+    "bounding box", "detection", "threshold", "confidence score", "probability",
+    "pixel", "model output", "candidate", "re-ranker", "reranker", "iou", "logit",
+)
+_NUMBER_WORDS = {
+    "zero": 0, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "twenty": 20,
+    "dozen": 12, "hundred": 100,
+}
+
+
+def grounding_facts_text(query: str, facts: dict[str, Any]) -> str:
+    """The grounding model's findings as the prompt's FACTS block."""
+    lines = [
+        f"User's request: {query}",
+        "",
+        "FACTS",
+        f"- The model marked {len(facts['regions'])} numbered box(es) on the image.",
+    ]
+    for region in facts["regions"]:
+        role = "the best match" if region["number"] == 1 else "a less likely match"
+        lines.append(
+            f"- Box {region['number']}: {role}; position: {region['position']} of the image; "
+            f"covers {region['size']}; the model is {region['certainty']} about it."
+        )
+    return "\n".join(lines)
+
+
+def _sides(text: str) -> set[str]:
+    """Image sides named in ``text``: 'upper-left' -> {top, left}."""
+    words = re.findall(r"[a-z]+", text.lower())
+    return {_SIDE_WORDS[w] for w in words if w in _SIDE_WORDS}
+
+
+def _position_sides(position: str) -> set[str]:
+    return {part for part in position.split("-") if part in {"left", "right", "top", "bottom"}}
+
+
+_PERCENT_RE = re.compile(r"([0-9]+(?:[.,][0-9]+)?)\s*(%|percent\b|per cent\b)")
+
+
+def _grounding_numbers(facts: dict[str, Any]) -> tuple[list[float], list[float]]:
+    """(counts, percentages) the narration may contain.
+
+    Kept apart so a count cannot pass by matching a percentage: "three ships"
+    is not supported by a box that covers 3% of the image.
+    """
+    counts = [float(len(facts["regions"]))]
+    percentages: list[float] = []
+    for region in facts["regions"]:
+        counts.append(float(region["number"]))
+        percentages += [region["share"] * 100, region["confidence"] * 100]
+    return counts, percentages
+
+
+def _check_grounding_text(
+    text: str, allowed: tuple[list[float], list[float]], sides: set[str], where: str,
+) -> None:
+    lowered = text.lower()
+    counts, percentages = allowed
+    bad = _unsupported_numbers(" ".join(m.group(1) for m in _PERCENT_RE.finditer(lowered)),
+                               percentages)
+    bad += _unsupported_numbers(_PERCENT_RE.sub(" ", lowered), counts)
+    for word in re.findall(r"[a-z]+", lowered):
+        value = _NUMBER_WORDS.get(word)
+        if value is not None and not any(abs(value - fact) <= ABSOLUTE_TOLERANCE for fact in counts):
+            bad.append(word)
+    if bad:
+        raise NarrationRejected(f"{where} contains figures the model did not produce: {', '.join(bad)}")
+    if compass := sorted(set(re.findall(r"[a-z]+", lowered)) & _COMPASS_WORDS):
+        raise NarrationRejected(
+            f"{where} uses compass directions ({', '.join(compass)}), but the image's "
+            "orientation is unknown"
+        )
+    if extra := _sides(text) - sides:
+        raise NarrationRejected(
+            f"{where} places something on the {', '.join(sorted(extra))} of the image, "
+            "where the model marked no box"
+        )
+    if jargon := [term for term in _JARGON if re.search(rf"\b{re.escape(term)}\b", lowered)]:
+        raise NarrationRejected(f"{where} uses technical terms: {', '.join(jargon)}")
+
+
+def check_grounding(parsed: dict[str, Any], facts: dict[str, Any]) -> Narration:
+    """Accept the VLM's grounding explanation only if it stays within the model's facts."""
+    summary = parsed.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise NarrationRejected("no summary was returned")
+    summary = summary.strip()
+    if len(summary) > MAX_SUMMARY_CHARS:
+        raise NarrationRejected("the summary was too long")
+
+    by_number = {region["number"]: region for region in facts["regions"]}
+    allowed = _grounding_numbers(facts)
+    all_sides = set().union(*(_position_sides(r["position"]) for r in facts["regions"]))
+    _check_grounding_text(summary, allowed, all_sides, "the summary")
+
+    raw_boxes = parsed.get("boxes") or []
+    if not isinstance(raw_boxes, list):
+        raise NarrationRejected("the box descriptions were malformed")
+    boxes: dict[int, str] = {}
+    for item in raw_boxes:
+        if not isinstance(item, dict):
+            raise NarrationRejected("the box descriptions were malformed")
+        try:
+            number = int(item.get("number"))
+        except (TypeError, ValueError):
+            raise NarrationRejected("a box description had no valid box number") from None
+        if number not in by_number:
+            raise NarrationRejected(f"it described box {number}, which the model did not mark")
+        description = item.get("description")
+        if not isinstance(description, str) or not description.strip():
+            continue
+        text = description.strip().rstrip(".")
+        text = f"{text[:1].upper()}{text[1:]}."
+        if len(text) > MAX_REGION_CHARS:
+            raise NarrationRejected(f"the description of box {number} was too long")
+        _check_grounding_text(
+            text, allowed, _position_sides(by_number[number]["position"]), f"box {number}'s description"
+        )
+        boxes[number] = text
+    return Narration(summary=summary, regions=boxes)
