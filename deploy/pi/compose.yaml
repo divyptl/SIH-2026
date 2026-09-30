@@ -1,0 +1,31 @@
+# SatQuery AI API on a Raspberry Pi 5 (64-bit OS), running the image GitHub Actions
+# publishes (.github/workflows/deploy-backend.yml). The Pi needs only this folder:
+#
+#   ~/satquery/compose.yaml   this file
+#   ~/satquery/update.sh      pulls a new image and restarts; run by cron
+#   ~/satquery/.env           settings and secrets (see .env.example)
+#
+# HTTPS and the public URL come from Tailscale Funnel pointed at 127.0.0.1:7860,
+# so the port is not exposed to the rest of the network.
+
+name: satquery
+
+services:
+  api:
+    image: ${SATQUERY_IMAGE:-ghcr.io/divyptl/satquery-api:latest}
+    env_file: .env
+    environment:
+      # All four Cortex-A76 cores (the image defaults to 2).
+      OMP_NUM_THREADS: "4"
+    ports:
+      - "127.0.0.1:7860:7860"
+    restart: unless-stopped
+    volumes:
+      # Kept across updates so the checkpoints, IndicTrans2 and backbone
+      # weights download once.
+      - checkpoints:/home/user/app/checkpoints
+      - cache:/home/user/.cache
+
+volumes:
+  checkpoints:
+  cache:
