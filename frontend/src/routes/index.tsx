@@ -196,7 +196,7 @@ function Home() {
 
       <div className="mx-auto flex max-w-6xl flex-col gap-12 px-4 pb-20 sm:px-6">
         <form onSubmit={handleSubmit}>
-          <Card className="grid gap-0 py-0 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+          <Card className="grid gap-0 py-0 lg:grid-cols-[minmax(0,1.1fr)_auto_minmax(0,1fr)]">
             <Field
               data-invalid={error ? true : undefined}
               className="gap-3 p-4 sm:p-5"
@@ -272,7 +272,11 @@ function Home() {
               {error ? <FieldError>{error}</FieldError> : null}
             </Field>
 
-            <div className="flex flex-col gap-5 border-t p-4 sm:p-5 lg:border-s lg:border-t-0">
+            {/* Stacked, the halves are split by a row; side by side, by a column. */}
+            <Separator className="lg:hidden" />
+            <Separator orientation="vertical" className="hidden lg:block" />
+
+            <div className="flex flex-col gap-5 p-4 sm:p-5">
               <Field className="gap-3">
                 <FieldLabel htmlFor="prompt" className="font-heading text-base">
                   {t('home.promptLabel')}

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { LanguagePicker } from '#/components/language-picker'
 import { ModeToggle } from '#/components/mode-toggle'
 import { Button } from '#/components/ui/button'
+import { Separator } from '#/components/ui/separator'
 
 /** A satellite's orbit around a point on the ground. */
 function Mark() {
@@ -34,7 +35,7 @@ const Header = () => {
   const { t } = useTranslation()
   const onDemo = Boolean(useMatchRoute()({ to: '/demo' }))
   return (
-    <header className="sticky top-0 z-30 border-b bg-background/80 backdrop-blur">
+    <header className="sticky top-0 z-30 bg-background/80 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
         <a
           href="/"
@@ -57,6 +58,7 @@ const Header = () => {
           <ModeToggle />
         </div>
       </div>
+      <Separator />
     </header>
   )
 }
