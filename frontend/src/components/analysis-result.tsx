@@ -667,17 +667,26 @@ function TraceSheet({
 
           <ol className="flex flex-col">
             {result.trace.steps.map((step, index) => (
-              <li key={index} className="relative flex gap-3 pb-5 last:pb-0">
+              <li key={index} className="relative flex gap-3">
                 <div className="flex flex-col items-center">
                   <span className="mt-1.5 size-2 shrink-0 rounded-full bg-foreground" />
                   {index < result.trace.steps.length - 1 && (
+                    // Runs from this dot to the next one, which sits 1.5 below
+                    // the top of the next row.
                     <Separator
                       orientation="vertical"
-                      className="mt-1 flex-1 self-center"
+                      className="-mb-1.5 flex-1 data-vertical:self-center"
                     />
                   )}
                 </div>
-                <div className="flex min-w-0 flex-1 flex-col gap-1 text-sm">
+                {/* The gap between steps is padding here rather than on the
+                    row, so the dot column (and its line) spans it. */}
+                <div
+                  className={cn(
+                    'flex min-w-0 flex-1 flex-col gap-1 text-sm',
+                    index < result.trace.steps.length - 1 && 'pb-5',
+                  )}
+                >
                   <div className="flex items-center gap-2">
                     <span className="font-medium">{step.stage}</span>
                     <span className="truncate font-mono text-xs text-muted-foreground">
