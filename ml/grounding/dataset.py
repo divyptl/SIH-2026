@@ -127,7 +127,8 @@ class _ImageSource:
             raise ImportError("Pillow is required: pip install Pillow")
         locator = self.index().get(name)
         if locator is None:
-            raise FileNotFoundError(f"Image '{name}' not found in {self.describe()}")
+            raise FileNotFoundError(
+                f"Image '{name}' not found in {self.describe()}")
         if self.image_dir is not None:
             return Image.open(locator).convert("RGB")
         with self._zip().open(locator) as fh:
@@ -157,6 +158,10 @@ class VRSBenchGroundingDataset(Dataset):
         local_annotations: Path to a local JSON file (alternative to the Hub).
         local_image_dir: Image directory used with local_annotations.
         max_samples: Limit the number of samples (for debugging).
+        annotations_file: Path to a VRSBench annotation JSON downloaded by
+            hand; skips the Hub download for annotations.
+        image_zip: Path to an Images_*.zip downloaded by hand; images are read
+            straight out of it, so it needs no unpacking.
     """
 
     def __init__(
@@ -171,6 +176,8 @@ class VRSBenchGroundingDataset(Dataset):
         local_annotations: str | None = None,
         local_image_dir: str | None = None,
         max_samples: int | None = None,
+        annotations_file: str | None = None,
+        image_zip: str | None = None,
     ) -> None:
         super().__init__()
         self.split = split
@@ -178,18 +185,21 @@ class VRSBenchGroundingDataset(Dataset):
 
         if local_annotations is not None:
             # Load from local JSON + image directory
-            self.samples = self._load_local(local_annotations, local_image_dir or ".")
+            self.samples = self._load_local(
+                local_annotations, local_image_dir or ".")
         else:
-            # Load from HuggingFace Hub
+            # Load from HuggingFace Hub, or from files downloaded by hand
             self.samples = self._load_from_hub(
                 data_name, split, cache_dir, image_dir, download_images,
                 auto_extract_zip, extracted_image_dir,
+                annotations_file, image_zip,
             )
 
         if max_samples is not None:
             self.samples = self.samples[:max_samples]
 
-        print(f"  VRSBench grounding [{split}]: {len(self.samples)} samples loaded")
+        print(
+            f"  VRSBench grounding [{split}]: {len(self.samples)} samples loaded")
 
     # ── HuggingFace Hub loading ─────────────────────────────────────────
 
@@ -202,13 +212,10 @@ class VRSBenchGroundingDataset(Dataset):
         download_images: bool,
         auto_extract_zip: bool = True,
         extracted_image_dir: str | None = None,
+        annotations_file: str | None = None,
+        image_zip: str | None = None,
     ) -> list[dict]:
         """Load grounding samples from the VRSBench files on the Hub."""
-        if hf_hub_download is None:
-            raise ImportError(
-                "The 'huggingface_hub' library is required to download VRSBench. "
-                "Install it with: pip install huggingface_hub"
-            )
         if split not in SPLIT_FILES:
             raise ValueError(
                 f"Unknown split '{split}'. Expected one of {sorted(SPLIT_FILES)}."
@@ -216,19 +223,34 @@ class VRSBenchGroundingDataset(Dataset):
 
         ann_file, archive = SPLIT_FILES[split]
 
-        print(f"  Loading VRSBench annotations from {data_name}/{ann_file}...")
-        ann_path = hf_hub_download(
-            repo_id=data_name,
-            filename=ann_file,
-            repo_type="dataset",
-            cache_dir=cache_dir,
-        )
+        if annotations_file:
+            ann_path = Path(annotations_file)
+            if not ann_path.is_file():
+                raise FileNotFoundError(
+                    f"annotations_file does not exist: {ann_path}"
+                )
+            print(f"  Using local annotations: {ann_path}")
+        else:
+            if hf_hub_download is None:
+                raise ImportError(
+                    "The 'huggingface_hub' library is required to download VRSBench. "
+                    "Install it with: pip install huggingface_hub"
+                )
+            print(
+                f"  Loading VRSBench annotations from {data_name}/{ann_file}...")
+            ann_path = hf_hub_download(
+                repo_id=data_name,
+                filename=ann_file,
+                repo_type="dataset",
+                cache_dir=cache_dir,
+            )
 
         images = self._resolve_images(
             data_name, archive, cache_dir, image_dir, download_images,
             auto_extract_zip=auto_extract_zip,
             extracted_image_dir=extracted_image_dir,
             split=split,
+            image_zip=image_zip,
         )
         self.image_source = images
 
@@ -245,7 +267,8 @@ class VRSBenchGroundingDataset(Dataset):
                 samples.append(sample)
 
         if missing_images:
-            print(f"  Skipped {missing_images} references with no matching image file")
+            print(
+                f"  Skipped {missing_images} references with no matching image file")
         if not samples:
             raise RuntimeError(
                 f"No grounding samples parsed from {ann_file}. The annotation "
@@ -263,6 +286,7 @@ class VRSBenchGroundingDataset(Dataset):
         auto_extract_zip: bool = True,
         extracted_image_dir: str | None = None,
         split: str = "train",
+        image_zip: str | None = None,
     ) -> _ImageSource:
         """Pick the image directory, or download and optionally extract the image archive."""
         if image_dir:
@@ -272,26 +296,39 @@ class VRSBenchGroundingDataset(Dataset):
             print(f"  Using local images: {path}")
             return _ImageSource(image_dir=str(path))
 
-        # Check if default extracted directory already exists and has images
         target_extract_dir = (
             Path(extracted_image_dir) / split
             if extracted_image_dir
             else (Path(cache_dir or "data/vrsbench") / "extracted" / split)
         )
+
+        # Check if default extracted directory already exists and has images
         if target_extract_dir.is_dir():
             has_images = any(
                 p.suffix.lower() in _IMAGE_SUFFIXES
                 for p in target_extract_dir.rglob("*")
             )
             if has_images:
-                print(f"  Using existing extracted images: {target_extract_dir}")
+                print(
+                    f"  Using existing extracted images: {target_extract_dir}")
                 return _ImageSource(image_dir=str(target_extract_dir))
+
+        # An archive downloaded by hand, used in place of the Hub download
+        if image_zip:
+            path = Path(image_zip)
+            if not path.is_file():
+                raise FileNotFoundError(f"image_zip does not exist: {path}")
+            print(f"  Using local image archive: {path}")
+            if auto_extract_zip:
+                return self._extract_zip(str(path), target_extract_dir)
+            return _ImageSource(zip_path=str(path))
 
         if not download_images:
             raise RuntimeError(
-                f"VRSBench images are needed but no image_dir was given and "
-                f"downloading is disabled. Either pass --image-dir pointing at "
-                f"extracted VRSBench images, or drop --no-download-images to "
+                f"VRSBench images are needed but no image_dir or image_zip was "
+                f"given and downloading is disabled. Either pass --image-dir "
+                f"(extracted images) or --image-zip (the downloaded archive), "
+                f"or drop --no-download-images to "
                 f"fetch {archive} (~{ARCHIVE_SIZES_GB.get(archive, 0):.1f} GB) "
                 f"from {data_name}."
             )
@@ -311,17 +348,26 @@ class VRSBenchGroundingDataset(Dataset):
 
         # High-throughput optimization: extract zip once on SSD to avoid on-the-fly decompress
         if auto_extract_zip:
-            print(
-                f"  Extracting {archive} to {target_extract_dir} for high-throughput training... "
-                f"(One-time operation to eliminate zipfile decompression bottleneck)"
-            )
-            target_extract_dir.mkdir(parents=True, exist_ok=True)
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(target_extract_dir)
-            print(f"  Extraction complete: {target_extract_dir}")
-            return _ImageSource(image_dir=str(target_extract_dir))
+            return self._extract_zip(zip_path, target_extract_dir)
 
         return _ImageSource(zip_path=zip_path)
+
+    @staticmethod
+    def _extract_zip(zip_path: str, target_dir: Path) -> _ImageSource:
+        """Unpack an image archive once so training reads plain files.
+
+        Decompressing on the fly is a throughput bottleneck, so the archive is
+        expanded to disk the first time and reused afterwards.
+        """
+        print(
+            f"  Extracting {Path(zip_path).name} to {target_dir} for high-throughput "
+            f"training... (One-time operation to eliminate zipfile decompression bottleneck)"
+        )
+        target_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(target_dir)
+        print(f"  Extraction complete: {target_dir}")
+        return _ImageSource(image_dir=str(target_dir))
 
     def _parse_hub_item(self, item: dict) -> list[dict]:
         """Parse one annotation entry into zero or more grounding samples.

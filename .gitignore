@@ -28,6 +28,7 @@ models/
 *.npz
 *.hdf5
 data/
+!data/**/*.py
 datasets/
 raw_data/
 processed_data/
@@ -36,6 +37,7 @@ processed_data/
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
 .venv/
 venv/
 env/

@@ -64,12 +64,18 @@ _SHARED_RULES = """\
 Ground every statement in what is actually visible in the imagery. If the imagery \
 does not support an answer, say so plainly instead of guessing.
 
-Report confidence honestly: use above 0.8 only when the visual evidence is \
-unambiguous, and below 0.4 when the imagery is too coarse, too cloudy, or too \
-ambiguous to be sure.
+Always include the top-level "confidence" score: your own estimate, from 0 to 1, \
+that the answer is correct. Report it honestly: above 0.8 only when the visual \
+evidence is unambiguous, and below 0.4 when the imagery is too coarse, too cloudy, \
+or too ambiguous to be sure. Give each evidence entry its own "confidence" too.
 
 Bounding boxes use normalised coordinates in [0, 1], where (0,0) is the top-left \
-corner and (1,1) the bottom-right."""
+corner and (1,1) the bottom-right.
+
+The image numbers 0 and 1 are only for "image_index". In "answer", "label" and \
+"description", which the user reads, call them "the first image" and "the second \
+image" (or "the earlier image" and "the later image" for a before/after pair), never \
+"image 0" or "image 1"."""
 
 _TASK_INSTRUCTIONS: dict[Task, str] = {
     "vqa": """\
@@ -141,9 +147,28 @@ def analysis_system_prompt(task: Task) -> str:
     return f"{_TASK_INSTRUCTIONS[task]}\n\n{_SHARED_RULES}\n\n{ANALYSIS_RESPONSE_SHAPE}"
 
 
-def build_user_message(*, query: str, image_summaries: list[str], task: Task) -> str:
-    """The text half of the user turn: query plus resolved input context."""
+def build_user_message(
+    *,
+    query: str,
+    image_summaries: list[str],
+    task: Task,
+    specialist_context: str | None = None,
+) -> str:
+    """The text half of the user turn: query plus resolved input context.
+
+    When ``specialist_context`` is provided (hybrid execution), a fine-tuned
+    model's analysis is included so the VLM can reference domain-adapted
+    evidence alongside the images.
+    """
     lines = [f"Task: {task}", "", "Input images:"]
     lines.extend(f"  [{i}] {summary}" for i, summary in enumerate(image_summaries))
+    if specialist_context:
+        lines.extend([
+            "",
+            "Domain-adapted specialist analysis (from a fine-tuned model — use this "
+            "as additional evidence when answering, but always verify against the "
+            "actual images):",
+            f"  {specialist_context}",
+        ])
     lines.extend(["", f"User query: {query}"])
     return "\n".join(lines)

@@ -43,7 +43,7 @@ from ml.fusion.transforms import PairedTransform, normalize_optical, normalize_s
 
 # ── Terrain label mapping ───────────────────────────────────────────────
 
-TERRAIN_TO_IDX = {"agri": 0, "barrenland": 1, "grassland": 2, "urban": 3}
+TERRAIN_TO_IDX = {"agri": 0, "barrenland": 1, "grassland": 2, "urban": 3, "water": 4}
 
 
 def collate_with_terrain(batch):
@@ -83,7 +83,7 @@ def train_one_epoch(
     train_loaders: list[DataLoader],
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
-    scaler: torch.amp.GradScaler | None,
+    scaler: torch.cuda.amp.GradScaler | None,
     use_amp: bool,
     device: str,
     epoch: int,
@@ -120,8 +120,8 @@ def train_one_epoch(
             optical = normalize_optical(optical.to(device))
             terrain_labels = terrain_labels.to(device)
 
-            # Forward: get embeddings
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            # Forward pass under autocast
+            with torch.cuda.amp.autocast(enabled=use_amp):
                 sar_emb, opt_emb = model(sar, optical)
 
                 # Contrastive loss (in-domain only)
@@ -142,7 +142,7 @@ def train_one_epoch(
                 # Scale the loss to average gradients across domains
                 domain_loss = domain_loss / num_domains
                 
-            # Backward IMMEDIATELY to free the graph and VRAM
+            # Scaled backward pass, run per domain to free the graph and VRAM
             if scaler is not None:
                 scaler.scale(domain_loss).backward()
             else:
@@ -235,7 +235,7 @@ def evaluate(
             optical = normalize_optical(optical.to(device))
             terrain_labels = terrain_labels.to(device)
 
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.cuda.amp.autocast(enabled=use_amp):
                 sar_emb, opt_emb = model(sar, optical)
                 _, metrics = loss_fn(sar_emb, opt_emb)
 
@@ -271,6 +271,7 @@ def save_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     metrics: dict,
     model_cfg: ModelConfig,
+    scaler: torch.cuda.amp.GradScaler | None = None,
 ) -> None:
     """Save a training checkpoint."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -289,6 +290,8 @@ def save_checkpoint(
     }
     if terrain_head is not None:
         state["terrain_head"] = terrain_head.state_dict()
+    if scaler is not None:
+        state["scaler"] = scaler.state_dict()
     torch.save(state, path)
     print(f"  Checkpoint saved: {path}")
 
@@ -301,6 +304,7 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: str,
+    scaler: torch.cuda.amp.GradScaler | None = None,
 ) -> int:
     """Load a checkpoint. Returns the epoch to resume from."""
     ckpt = torch.load(path, map_location=device, weights_only=False)
@@ -310,6 +314,8 @@ def load_checkpoint(
     scheduler.load_state_dict(ckpt["scheduler"])
     if terrain_head is not None and "terrain_head" in ckpt:
         terrain_head.load_state_dict(ckpt["terrain_head"])
+    if scaler is not None and "scaler" in ckpt:
+        scaler.load_state_dict(ckpt["scaler"])
     print(f"  Resumed from checkpoint: {path} (epoch {ckpt['epoch']})")
     return ckpt["epoch"]
 
@@ -473,7 +479,7 @@ def main() -> None:
             feat_dim = 768
         else:
             feat_dim = 512 if model_cfg.backbone in ("resnet18", "resnet34") else 2048
-        terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=4).to(device)
+        terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=5).to(device)
 
     total_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"  Model params: {total_params:.1f}M")
@@ -501,17 +507,23 @@ def main() -> None:
         steps_per_epoch,
     )
 
+    # ── AMP setup ──
+    # Create the grad scaler before the training loop (and before resuming, so
+    # a checkpoint can restore its loss scale)
+    use_amp = train_cfg.use_amp and device == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
+
     # ── Resume ──
     start_epoch = 1
     if train_cfg.resume_from:
         start_epoch = load_checkpoint(
             train_cfg.resume_from, model, loss_fn, terrain_head,
-            optimizer, scheduler, device,
+            optimizer, scheduler, device, scaler,
         ) + 1
 
     # ── AMP setup ──
     use_amp = train_cfg.use_amp and device == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
 
     # ── Training loop ──
     print(f"\nStarting training from epoch {start_epoch}...\n")
@@ -559,7 +571,7 @@ def main() -> None:
         save_checkpoint(
             train_cfg.checkpoint_path / "latest.pt",
             epoch, model, loss_fn, terrain_head,
-            optimizer, scheduler, all_metrics, model_cfg,
+            optimizer, scheduler, all_metrics, model_cfg, scaler,
         )
 
         # Save numbered checkpoint at configured interval
@@ -567,7 +579,7 @@ def main() -> None:
             save_checkpoint(
                 train_cfg.checkpoint_path / f"epoch_{epoch}.pt",
                 epoch, model, loss_fn, terrain_head,
-                optimizer, scheduler, all_metrics, model_cfg,
+                optimizer, scheduler, all_metrics, model_cfg, scaler,
             )
 
         # Save best model
@@ -576,7 +588,7 @@ def main() -> None:
             save_checkpoint(
                 train_cfg.checkpoint_path / "best.pt",
                 epoch, model, loss_fn, terrain_head,
-                optimizer, scheduler, all_metrics, model_cfg,
+                optimizer, scheduler, all_metrics, model_cfg, scaler,
             )
             print(f"  >> New best model! val_loss={best_val_loss:.4f}")
 
@@ -584,7 +596,7 @@ def main() -> None:
     save_checkpoint(
         train_cfg.checkpoint_path / "final.pt",
         train_cfg.epochs, model, loss_fn, terrain_head,
-        optimizer, scheduler, history[-1] if history else {}, model_cfg,
+        optimizer, scheduler, history[-1] if history else {}, model_cfg, scaler,
     )
 
     history_path = train_cfg.checkpoint_path / "history.json"

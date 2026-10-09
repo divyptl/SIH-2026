@@ -1,0 +1,124 @@
+{
+  "query": "Where is a storage tank on the upper left?",
+  "request_id": "d459682868f4",
+  "task": "grounding",
+  "answer": "The region the query refers to is marked as box 1.",
+  "confidence": 0.835,
+  "evidence": [
+    {
+      "type": "bbox",
+      "data": {
+        "x_min": 0.1247375,
+        "y_min": 0.175525,
+        "x_max": 0.4096125,
+        "y_max": 0.40791249999999996
+      },
+      "description": "Best match for the query.",
+      "label": null,
+      "confidence": 0.835,
+      "image_index": 0
+    }
+  ],
+  "model_name": "ml.grounding (checkpoints/grounding/v1/best.pt + 5 re-ranker(s))",
+  "execution_time_ms": 481.17,
+  "inputs": [
+    {
+      "index": 0,
+      "filename": "11074.jpg",
+      "content_type": "image/jpeg",
+      "detected_format": "JPEG",
+      "modality": "optical",
+      "width": 800,
+      "height": 800,
+      "size_bytes": 517084,
+      "is_georeferenced": false,
+      "ground_sample_distance_m": null,
+      "notes": [
+        "JPEG: no georeferencing; locations are reported in image pixels."
+      ],
+      "preview_data_uri": null
+    }
+  ],
+  "trace": {
+    "input_configuration": "single",
+    "task": "grounding",
+    "task_source": "auto",
+    "routing_rationale": "Rule-based: one image, and the query asks to locate something (\"where\"), so 'grounding'.",
+    "selected_tools": ["rs-grounding"],
+    "steps": [
+      {
+        "stage": "validate",
+        "tool": "input-validator",
+        "model": null,
+        "params": {
+          "image_count": 1,
+          "modalities": ["optical"],
+          "formats": ["JPEG"]
+        },
+        "detail": "Resolved input configuration: single.",
+        "duration_ms": 0.01
+      },
+      {
+        "stage": "classify",
+        "tool": "query-router",
+        "model": null,
+        "params": {
+          "input_configuration": "single"
+        },
+        "detail": "Task 'grounding' (auto). Rule-based: one image, and the query asks to locate something (\"where\"), so 'grounding'.",
+        "duration_ms": 0.02
+      },
+      {
+        "stage": "select",
+        "tool": "tool-selector",
+        "model": "ml.grounding (checkpoints/grounding/v1/best.pt + 5 re-ranker(s))",
+        "params": {
+          "backend": "local_specialist",
+          "permitted_params": ["temperature", "max_tokens"]
+        },
+        "detail": "Selected 'rs-grounding' for task 'grounding'.",
+        "duration_ms": 0.23
+      },
+      {
+        "stage": "execute",
+        "tool": "rs-grounding",
+        "model": "ml.grounding (checkpoints/grounding/v1/best.pt + 5 re-ranker(s))",
+        "params": {
+          "backend": "local_specialist",
+          "checkpoint": "checkpoints/grounding/v1/best.pt + 5 re-ranker(s)"
+        },
+        "detail": "Ran grounding over 1 image(s).",
+        "duration_ms": 480.8
+      },
+      {
+        "stage": "aggregate",
+        "tool": "response-aggregator",
+        "model": null,
+        "params": {
+          "evidence_items": 1,
+          "bounding_boxes": 1
+        },
+        "detail": "Combined answer with 1 spatial evidence region(s).",
+        "duration_ms": 0.02
+      }
+    ],
+    "total_duration_ms": 481.17,
+    "domain_adapted": true,
+    "warnings": [
+      "JPEG: no georeferencing; locations are reported in image pixels."
+    ]
+  },
+  "usage": null,
+  "translation": null,
+  "narration": null,
+  "ground_truth": {
+    "text": "A storage tank on the upper left",
+    "box": {
+      "x_min": 0.12625,
+      "y_min": 0.185,
+      "x_max": 0.4025,
+      "y_max": 0.415
+    },
+    "source": "DIOR-RSVG test split, image 11074"
+  }
+}

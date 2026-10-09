@@ -1,5 +1,5 @@
 """
-Accuracy evaluation for the grounding model on VRSBench.
+Accuracy evaluation for the grounding model on VRSBench or DIOR-RSVG.
 
 Reports the metrics VRSBench uses for visual grounding: the share of referring
 expressions whose top-scoring predicted box overlaps the ground-truth box at
@@ -19,6 +19,19 @@ Usage:
     # Quick check on a subset, saving per-sample results
     python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt \
         --max-samples 1000 --output results.json
+
+    # Two-stage: GroundingDINO candidates chosen between by the re-ranker
+    python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt \
+        --reranker checkpoints/grounding/reranker.pt
+
+    # Several re-rankers are averaged; --no-tta / --no-fuse switch off the
+    # test-time flips and box fusion
+    python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt \
+        --reranker checkpoints/grounding/reranker*.pt
+
+    # DIOR-RSVG test split (unique/non-unique does not apply there)
+    python -m ml.grounding.evaluate --checkpoint checkpoints/grounding/best.pt \
+        --dataset dior_rsvg --reranker checkpoints/grounding/reranker*.pt
 """
 
 from __future__ import annotations
@@ -42,7 +55,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from ml.grounding.config import ModelConfig, TrainConfig
 from ml.grounding.dataset import VRSBenchGroundingDataset, collate_fn
+from ml.grounding.dior_rsvg import DIORRSVGDataset
 from ml.grounding.model import GroundingModel
+from ml.grounding.rerank import RerankerEnsemble, load_reranker_ensemble, rerank_outputs
 from ml.grounding.train import resolve_amp
 from ml.grounding.transforms import prepare_training_batch
 
@@ -77,7 +92,7 @@ def load_model(checkpoint: str | None) -> tuple[GroundingModel, str]:
     ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
     model_id = ckpt.get("model_config", {}).get("model_id", ModelConfig.model_id)
     grounding = GroundingModel(ModelConfig(model_id=model_id, freeze_backbone=False))
-    grounding.model.load_state_dict(ckpt["model"])
+    grounding.load_weights(ckpt["model"])
     return grounding, f"{checkpoint} (epoch {ckpt.get('epoch', '?')})"
 
 
@@ -90,8 +105,13 @@ def predict(
     num_workers: int,
     image_size: int,
     amp_dtype: torch.dtype,
+    reranker: RerankerEnsemble | None = None,
 ) -> list[dict]:
-    """Run the model over the dataset and score its top-1 box per expression."""
+    """Run the model over the dataset and score its top-1 box per expression.
+
+    With a re-ranker, the top-1 box is the re-ranker's pick among
+    GroundingDINO's candidates rather than GroundingDINO's most confident query.
+    """
     grounding.model.eval()
     loader = DataLoader(
         _Indexed(dataset),
@@ -120,10 +140,18 @@ def predict(
         # Each of the 900 queries scores against every text token; padded
         # tokens are -inf. A query's confidence is its best token, and the
         # prediction for the expression is the most confident query's box.
-        scores = outputs.logits.float().sigmoid().max(dim=-1).values   # (B, Q)
-        best_score, best_query = scores.max(dim=-1)                     # (B,)
-        rows = torch.arange(len(best_query), device=best_query.device)
-        pred_boxes = outputs.pred_boxes.float()[rows, best_query]       # (B, 4) cxcywh
+        if reranker is not None:
+            picked = rerank_outputs(
+                reranker, outputs, inputs["pixel_values"], inputs["input_ids"],
+                inputs["attention_mask"],
+            )
+            best_score = picked["probs"][:, 0]
+            pred_boxes = picked["boxes"][:, 0]
+        else:
+            scores = outputs.logits.float().sigmoid().max(dim=-1).values   # (B, Q)
+            best_score, best_query = scores.max(dim=-1)                     # (B,)
+            rows = torch.arange(len(best_query), device=best_query.device)
+            pred_boxes = outputs.pred_boxes.float()[rows, best_query]       # (B, 4) cxcywh
 
         # IoU is unchanged by scaling each axis, so normalized coordinates
         # give the same value as pixel coordinates.
@@ -177,9 +205,9 @@ def summarize(records: list[dict]) -> dict:
     }
 
 
-def print_summary(summary: dict, model_name: str) -> None:
+def print_summary(summary: dict, model_name: str, benchmark: str = "VRSBench") -> None:
     print("\n" + "=" * 70)
-    print(f"  VRSBench grounding accuracy — {model_name}")
+    print(f"  {benchmark} grounding accuracy — {model_name}")
     print("=" * 70)
     header = f"  {'subset':<18}{'count':>8}{'Acc@0.5':>10}{'Acc@0.7':>10}{'mIoU':>8}"
     print(header)
@@ -198,17 +226,32 @@ def print_summary(summary: dict, model_name: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate grounding accuracy on VRSBench")
+    parser = argparse.ArgumentParser(description="Evaluate grounding accuracy")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--checkpoint", type=str, help="Fine-tuned .pt checkpoint")
     source.add_argument("--pretrained", action="store_true",
                         help="Evaluate the zero-shot pre-trained model")
+    parser.add_argument("--reranker", type=str, nargs="+", default=None,
+                        help="Re-ranker .pt file(s) from train_rerank.py; picks among "
+                             "the checkpoint's candidates. Several are averaged.")
+    parser.add_argument("--no-tta", action="store_true",
+                        help="Re-ranker: skip the mirrored test-time views")
+    parser.add_argument("--no-fuse", action="store_true",
+                        help="Re-ranker: return the chosen candidate's box unfused")
+    parser.add_argument("--dataset", choices=["vrsbench", "dior_rsvg"], default="vrsbench")
+    parser.add_argument("--split", default=None,
+                        help="Default: VRSBench's eval file, or DIOR-RSVG's test split")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--image-size", type=int, default=None,
                         help="Must match training (default from TrainConfig)")
     parser.add_argument("--image-dir", type=str, default=None,
                         help="Directory of extracted VRSBench validation images")
+    parser.add_argument("--image-zip", type=str, default=None,
+                        help="Images_val.zip you downloaded yourself; read "
+                             "directly, no unpacking needed")
+    parser.add_argument("--annotations", type=str, default=None,
+                        help="VRSBench_EVAL_referring.json you downloaded yourself")
     parser.add_argument("--max-samples", type=int, default=None,
                         help="Evaluate N expressions spread evenly across the file")
     parser.add_argument("--no-amp", action="store_true")
@@ -227,7 +270,18 @@ def main() -> None:
 
     print(f"Device: {device}  |  precision: {amp_dtype}  |  image size: {image_size}")
 
-    dataset = VRSBenchGroundingDataset(split="validation", image_dir=args.image_dir)
+    if args.dataset == "vrsbench":
+        benchmark = "VRSBench"
+        dataset = VRSBenchGroundingDataset(
+            split=args.split or "validation",
+            cache_dir=train_cfg.data_cache_dir,
+            image_dir=args.image_dir,
+            annotations_file=args.annotations,
+            image_zip=args.image_zip,
+        )
+    else:
+        benchmark = f"DIOR-RSVG {args.split or 'test'}"
+        dataset = DIORRSVGDataset(args.split or "test")
     if args.max_samples and args.max_samples < len(dataset):
         # The file is ordered by image, so a leading slice covers only a few
         # scenes and classes. Take evenly spaced expressions instead.
@@ -237,13 +291,26 @@ def main() -> None:
 
     grounding, model_name = load_model(None if args.pretrained else args.checkpoint)
     grounding.model.to(device)
+    reranker = None
+    if args.reranker:
+        if args.pretrained:
+            parser.error("--reranker needs the --checkpoint it was trained on")
+        reranker = load_reranker_ensemble(
+            args.reranker, device, tta=not args.no_tta,
+            fuse_iou=None if args.no_fuse else 0.3,
+        )
+        trained_on = reranker.detector_checkpoint
+        if trained_on and Path(trained_on).resolve() != Path(args.checkpoint).resolve():
+            print(f"  Warning: re-ranker was trained on candidates from {trained_on}")
+        model_name += f" + {len(reranker.models)} re-ranker(s)"
     print(f"Loaded {model_name}\n")
 
     records = predict(
         grounding, dataset, device, args.batch_size, num_workers, image_size, amp_dtype,
+        reranker=reranker,
     )
     summary = summarize(records)
-    print_summary(summary, model_name)
+    print_summary(summary, model_name, benchmark)
 
     if args.output:
         out = Path(args.output)

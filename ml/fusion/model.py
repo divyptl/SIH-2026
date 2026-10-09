@@ -179,8 +179,13 @@ class SelfAttentionBlock(nn.Module):
 
         self.norm = nn.LayerNorm(attn_dim)
 
-        # Project back to original backbone dimension
+        # Project back to original backbone dimension. Zero-init so the block
+        # starts as an identity: a randomly initialised projection adds noise on
+        # the same scale as the pretrained ResNet features, wiping out the
+        # ImageNet initialisation before contrastive training can use it.
         self.proj_out = nn.Linear(attn_dim, feat_dim)
+        nn.init.zeros_(self.proj_out.weight)
+        nn.init.zeros_(self.proj_out.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Refine spatial features via self-attention with a residual connection.
@@ -445,16 +450,16 @@ class TerrainClassifier(nn.Module):
 
     Args:
         feature_dim: Backbone feature dimensionality (per modality).
-        num_classes: Number of terrain classes (default 4: agri/barren/grass/urban).
+        num_classes: Number of terrain classes (default 5: agri/barren/grass/urban/water).
         hidden_dim: Hidden layer size.
     """
 
-    TERRAIN_CLASSES = ["agri", "barrenland", "grassland", "urban"]
+    TERRAIN_CLASSES = ["agri", "barrenland", "grassland", "urban", "water"]
 
     def __init__(
         self,
         feature_dim: int = 512,
-        num_classes: int = 4,
+        num_classes: int = 5,
         hidden_dim: int = 256,
     ) -> None:
         super().__init__()
@@ -487,7 +492,7 @@ if __name__ == "__main__":
         attn_layers=2,
     )
     loss_fn = ContrastiveLoss(temperature=0.07, learn_temperature=False)
-    terrain_head = TerrainClassifier(feature_dim=2048, num_classes=4)
+    terrain_head = TerrainClassifier(feature_dim=2048, num_classes=5)
 
     # Fake batch
     batch_size = 4

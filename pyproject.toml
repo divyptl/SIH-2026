@@ -1,0 +1,19 @@
+# uv workspace: backend/ and ml/ share one lockfile and one environment, so the
+# backend imports the specialists as `ml.*` like any other installed package.
+#
+#   uv sync --package backend            # serve the API
+#   uv sync --package ml --extra train   # train models
+
+[tool.uv.workspace]
+members = ["backend", "ml"]
+
+# CUDA 13 wheels (RTX 50-series needs CUDA >= 12.8). CPU-only machines still work:
+# every model falls back to CPU when no GPU is visible.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]

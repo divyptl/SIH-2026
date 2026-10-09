@@ -1,15 +1,17 @@
 """Upload decoding, compatibility checking, and VLM-ready encoding.
 
 Covers the problem statement's "input upload and compatibility checking" step:
-uploads are restricted to georeferenced GeoTIFF rasters, pairs must be
-spatially corresponding, and every raster is normalised into an 8-bit RGB PNG
-data URI before it reaches a vision-language model.
+uploads are GeoTIFF, TIFF, PNG or JPEG images, pairs must be spatially
+corresponding, and every raster is normalised into an 8-bit RGB PNG data URI
+before it reaches a vision-language model. Only a GeoTIFF carries
+georeferencing; other formats are analysed in pixel space.
 """
 
 from __future__ import annotations
 
 import base64
 import io
+import math
 from dataclasses import dataclass
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -18,18 +20,31 @@ from schemas import ImageInfo, Modality
 
 # GeoTIFF is a TIFF with extra tags, so Pillow reports both as "TIFF"; the
 # georeferencing-tag check below is what separates a GeoTIFF from a plain TIFF.
-ALLOWED_FORMATS = {"TIFF"}
+ALLOWED_FORMATS = {"TIFF", "PNG", "JPEG"}
 
 ALLOWED_EXTENSIONS = {
     ".tif",
     ".tiff",
+    ".png",
+    ".jpg",
+    ".jpeg",
 }
+
+SUPPORTED_DESCRIPTION = "a GeoTIFF, TIFF, PNG or JPEG image"
 
 # GeoTIFF private tags. Presence of either means the raster carries a CRS and
 # a pixel-to-world transform, i.e. it is georeferenced rather than a plain TIFF.
 _TAG_GEO_KEY_DIRECTORY = 34735
 _TAG_MODEL_PIXEL_SCALE = 33550
 _TAG_MODEL_TIEPOINT = 33922
+
+# GeoKeys used to turn the pixel scale into metres.
+_KEY_MODEL_TYPE = 1024          # 1 = projected, 2 = geographic (lat/lon)
+_KEY_PROJ_LINEAR_UNITS = 3076   # EPSG unit code of a projected CRS
+_MODEL_PROJECTED, _MODEL_GEOGRAPHIC = 1, 2
+_UNIT_TO_METRES = {9001: 1.0, 9002: 0.3048, 9003: 0.3048006096}
+_METRES_PER_DEGREE_LAT = 110_574.0
+_METRES_PER_DEGREE_LON_EQUATOR = 111_320.0
 
 # Pair sizes are allowed to differ by this fraction and still count as
 # co-registered; anything beyond it is very unlikely to be the same footprint.
@@ -54,6 +69,9 @@ class PreparedImage:
 
     info: ImageInfo
     data_uri: str
+    # Metres per pixel of ``data_uri`` (after any downscaling), or None when
+    # the upload carries no georeferencing to derive it from.
+    analysis_gsd_m: float | None = None
 
 
 def _infer_modality(filename: str, image: Image.Image, declared: str | None) -> Modality:
@@ -94,6 +112,44 @@ def _is_georeferenced(image: Image.Image) -> bool:
         tag in tags
         for tag in (_TAG_GEO_KEY_DIRECTORY, _TAG_MODEL_PIXEL_SCALE, _TAG_MODEL_TIEPOINT)
     )
+
+
+def _geo_keys(tags) -> dict[int, int]:
+    """GeoKey id -> inline value from the GeoKeyDirectory tag."""
+    directory = tags.get(_TAG_GEO_KEY_DIRECTORY)
+    if not directory or len(directory) < 4:
+        return {}
+    keys: dict[int, int] = {}
+    for offset in range(4, 4 + 4 * int(directory[3]), 4):
+        key_id, location, _count, value = directory[offset : offset + 4]
+        if location == 0:  # value stored inline
+            keys[int(key_id)] = int(value)
+    return keys
+
+
+def ground_sample_distance(image: Image.Image) -> float | None:
+    """Metres per pixel of a GeoTIFF, from its pixel scale and CRS type.
+
+    Projected CRSs give the scale in linear units (usually metres). Geographic
+    CRSs give it in degrees, converted at the latitude of the tie point. Any
+    other or incomplete georeferencing yields None rather than a guess.
+    """
+    tags = getattr(image, "tag_v2", None)
+    scale = tags.get(_TAG_MODEL_PIXEL_SCALE) if tags is not None else None
+    if not scale or len(scale) < 2 or scale[0] <= 0 or scale[1] <= 0:
+        return None
+    keys = _geo_keys(tags)
+    model_type = keys.get(_KEY_MODEL_TYPE)
+    if model_type == _MODEL_PROJECTED:
+        factor = _UNIT_TO_METRES.get(keys.get(_KEY_PROJ_LINEAR_UNITS, 9001))
+        return None if factor is None else (scale[0] + scale[1]) / 2 * factor
+    if model_type == _MODEL_GEOGRAPHIC:
+        tiepoint = tags.get(_TAG_MODEL_TIEPOINT)
+        latitude = float(tiepoint[4]) if tiepoint and len(tiepoint) >= 6 else 0.0
+        x = scale[0] * _METRES_PER_DEGREE_LON_EQUATOR * math.cos(math.radians(latitude))
+        y = scale[1] * _METRES_PER_DEGREE_LAT
+        return (x + y) / 2
+    return None
 
 
 def _stretch_high_bit_depth(image: Image.Image) -> Image.Image:
@@ -157,7 +213,7 @@ def prepare_upload(
     max_bytes: int,
     max_edge_px: int,
 ) -> PreparedImage:
-    """Validate one GeoTIFF upload and encode it as a PNG data URI."""
+    """Validate one image upload and encode it as a PNG data URI."""
     if not raw:
         raise ImageValidationError(f"'{filename}' is empty.")
 
@@ -172,7 +228,7 @@ def prepare_upload(
         image.load()
     except UnidentifiedImageError as exc:
         raise ImageValidationError(
-            f"'{filename}' is not a readable image. Uploads must be a GeoTIFF (.tif/.tiff)."
+            f"'{filename}' is not a readable image. Uploads must be {SUPPORTED_DESCRIPTION}."
         ) from exc
     except OSError as exc:
         raise ImageValidationError(f"'{filename}' could not be decoded: {exc}") from exc
@@ -181,20 +237,23 @@ def prepare_upload(
     if detected not in ALLOWED_FORMATS:
         raise ImageValidationError(
             f"'{filename}' is {detected}, which is not supported. "
-            "Uploads must be a GeoTIFF (.tif/.tiff)."
+            f"Uploads must be {SUPPORTED_DESCRIPTION}."
         )
+
+    if detected == "JPEG":
+        # Photos exported from phones and some viewers store rotation in EXIF.
+        image = ImageOps.exif_transpose(image)
 
     georeferenced = _is_georeferenced(image)
-    if not georeferenced:
-        raise ImageValidationError(
-            f"'{filename}' is a plain TIFF with no georeferencing tags. "
-            "Upload a GeoTIFF that carries a CRS and a pixel-to-world transform."
-        )
-
-    notes: list[str] = ["GeoTIFF: georeferencing tags present."]
+    notes: list[str] = (
+        ["GeoTIFF: georeferencing tags present."]
+        if georeferenced
+        else [f"{detected}: no georeferencing; locations are reported in image pixels."]
+    )
 
     modality = _infer_modality(filename, image, declared_modality)
     width, height = image.size
+    gsd_m = ground_sample_distance(image) if georeferenced else None
 
     rgb = _to_display_rgb(image)
     if rgb is not image:
@@ -226,10 +285,12 @@ def prepare_upload(
             height=height,
             size_bytes=len(raw),
             is_georeferenced=georeferenced,
+            ground_sample_distance_m=round(gsd_m, 3) if gsd_m is not None else None,
             notes=notes,
             preview_data_uri=f"data:image/jpeg;base64,{preview_encoded}",
         ),
         data_uri=f"data:image/png;base64,{encoded}",
+        analysis_gsd_m=gsd_m * width / rgb.width if gsd_m is not None else None,
     )
 
 

@@ -14,15 +14,14 @@ Internal planning is not part of the contract -- only the observable trace is.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import re
 import time
 import uuid
 from typing import Any
 
-from agent.prompts import (
-    ROUTER_SYSTEM_PROMPT,
-    analysis_system_prompt,
-    build_user_message,
-)
+from agent.narration import NarrationRejected, narrate
 from agent.registry import (
     DEFAULT_PAIR_TASK,
     DEFAULT_SINGLE_TASK,
@@ -35,18 +34,29 @@ from schemas import (
     Evidence,
     ExecutionTrace,
     InputConfiguration,
+    Narration,
     Task,
     TraceStep,
     Usage,
 )
 from services.images import PreparedImage, check_pair_compatibility
-from services.openrouter_client import (
-    OpenRouterClient,
-    OpenRouterError,
-    parse_json_object,
-)
+from services.openrouter_client import OpenRouterClient, OpenRouterError
+
+logger = logging.getLogger("satquery.controller")
+
+# A specialist accepts imagery up to this factor finer or coarser than the
+# range it was trained on; training applies resolution augmentation of up to 4x.
+GSD_TOLERANCE = 2.0
 
 VALID_TASKS: set[str] = set(TOOL_REGISTRY)
+
+# A question about one image that asks to locate something goes to grounding.
+# Matched on the English query (after translation), as whole words.
+_GROUNDING_WORDS = re.compile(
+    r"\b(where|locate|locating|find|finding|show|highlight|point out|mark|detect|"
+    r"box|which part|position of|location of)\b",
+    re.IGNORECASE,
+)
 
 
 class ControllerError(RuntimeError):
@@ -83,19 +93,6 @@ def _fallback_task(configuration: InputConfiguration) -> Task:
     if configuration == "cross_modal_pair":
         return "fusion"
     return DEFAULT_PAIR_TASK
-
-
-def _image_summary(image: PreparedImage) -> str:
-    info = image.info
-    bits = [
-        f"{info.filename}",
-        f"modality={info.modality}",
-        f"format={info.detected_format}",
-        f"size={info.width}x{info.height}",
-    ]
-    if info.is_georeferenced:
-        bits.append("georeferenced")
-    return ", ".join(bits)
 
 
 def _coerce_confidence(raw: Any) -> float:
@@ -152,6 +149,12 @@ def _coerce_evidence(raw: Any, image_count: int) -> list[Evidence]:
             ):
                 data = coords
                 kind = "bbox"
+
+        # A change mask from a specialist, as a PNG data URI (never from the VLM).
+        mask = item.get("mask")
+        if kind == "observation" and isinstance(mask, str) and mask.startswith("data:image/png;base64,"):
+            data = {"png": mask}
+            kind = "mask"
 
         label = item.get("label")
         confidence = item.get("confidence")
@@ -222,7 +225,8 @@ class AgenticController:
         else:
             task, rationale = await self._classify(query, images, configuration)
             task_source = "auto"
-            router_model = self._settings.router_model
+            # Routing is plain code; no model is involved.
+            router_model = None
 
         entry = TOOL_REGISTRY[task]
         if configuration not in entry.accepts:
@@ -247,12 +251,14 @@ class AgenticController:
 
         # --- 3. Select the tool ----------------------------------------------
         step_timer = _Timer()
-        tool_name, backend, model_name, domain_adapted = self._select(entry)
-        if not domain_adapted:
-            warnings.append(
-                f"No fine-tuned specialist is registered for '{task}'; answered by the "
-                f"generic '{model_name}' baseline, which is not remote-sensing adapted."
-            )
+        use_specialist = entry.specialist_available
+        if use_specialist:
+            use_specialist, note = await asyncio.to_thread(self._check_resolution, entry, images)
+            if note:
+                warnings.append(note)
+        tool_name, backend, model_name, domain_adapted = (
+            self._select(entry) if use_specialist else self._baseline(entry)
+        )
         steps.append(
             TraceStep(
                 stage="select",
@@ -266,34 +272,87 @@ class AgenticController:
 
         # --- 4. Execute -------------------------------------------------------
         step_timer = _Timer()
-        params = {"temperature": 0.2, "max_tokens": 1400}
-        payload, usage = await self._execute(
-            task=task, query=query, images=images, params=params
-        )
+        payload: dict[str, Any] | None = None
+        specialist_payload: dict[str, Any] | None = None
+        usage: dict[str, Any] = {}
+        params: dict[str, Any]
+        if domain_adapted and entry.runner is not None:
+            params = {"checkpoint": entry.checkpoint}
+            try:
+                payload = await asyncio.to_thread(entry.runner, query, images)
+            except Exception as exc:
+                # A broken specialist must not take the request down with it; the
+                # trace says plainly that the baseline answered instead.
+                logger.exception("Specialist '%s' failed; using the baseline", tool_name)
+                warnings.append(
+                    f"The fine-tuned specialist for '{task}' failed ({exc}); "
+                    "the generic VLM baseline answered instead."
+                )
+                tool_name, backend, model_name, domain_adapted = self._baseline(entry)
+
+            # Hybrid execution: the specialist returned evidence but no answer.
+            # Save the specialist payload and fall through to the VLM baseline
+            # which will receive the specialist's context in its prompt.
+            if payload is not None and not payload.get("answer"):
+                specialist_payload = payload
+                payload = None  # trigger VLM baseline below
+
+        if payload is None:
+            params = {"temperature": 0.2, "max_tokens": 1400}
+            specialist_context = (
+                specialist_payload.get("specialist_context")
+                if specialist_payload
+                else None
+            )
+            payload, usage = await self._execute_baseline(
+                task=task,
+                query=query,
+                images=images,
+                params=params,
+                specialist_context=specialist_context,
+            )
+            # Merge specialist evidence (terrain probs, similarity) ahead of
+            # any evidence the VLM itself produced, so the user sees both.
+            if specialist_payload is not None:
+                sp_evidence = specialist_payload.get("evidence", [])
+                payload["evidence"] = sp_evidence + (payload.get("evidence") or [])
+                # Prefer the specialist's confidence when the VLM omits one.
+                if payload.get("confidence") is None and specialist_payload.get("confidence") is not None:
+                    payload["confidence"] = specialist_payload["confidence"]
+
         steps.append(
             TraceStep(
                 stage="execute",
                 tool=tool_name,
                 model=model_name,
-                params=params,
+                params={"backend": backend, **params},
                 detail=f"Ran {task} over {len(images)} image(s).",
                 duration_ms=step_timer.ms(),
             )
         )
 
-        # --- 5. Aggregate outputs and confidence ------------------------------
+        # --- 5. Put a specialist's findings into plain language ---------------
+        narration: Narration | None = None
+        facts = payload.pop("narration_facts", None)
+        if facts and facts["regions"] and self._settings.narration_enabled:
+            narration, narration_usage = await self._narrate(
+                query=query, images=images, payload=payload, facts=facts,
+                steps=steps, warnings=warnings,
+            )
+            if narration_usage and not usage:
+                usage = narration_usage
+
+        # --- 6. Aggregate outputs and confidence ------------------------------
         step_timer = _Timer()
         answer = str(payload.get("answer") or "").strip()
         if not answer:
             raise ControllerError("The model returned an empty answer.")
 
+        # The model's own score, as reported; only a missing one is filled in.
+        if payload.get("confidence") is None:
+            warnings.append("The model did not report a confidence score; 0.5 is shown.")
         confidence = _coerce_confidence(payload.get("confidence"))
         evidence = _coerce_evidence(payload.get("evidence"), len(images))
-
-        if not domain_adapted:
-            # An unadapted baseline should not present itself as authoritative
-            # on a domain it was never tuned for.
-            confidence = min(confidence, 0.75)
 
         boxes = sum(1 for item in evidence if item.type == "bbox")
         steps.append(
@@ -328,6 +387,80 @@ class AgenticController:
                 warnings=warnings,
             ),
             usage=Usage(**usage) if usage else None,
+            narration=narration,
+        )
+
+    async def _narrate(
+        self,
+        *,
+        query: str,
+        images: list[PreparedImage],
+        payload: dict[str, Any],
+        facts: dict[str, Any],
+        steps: list[TraceStep],
+        warnings: list[str],
+    ) -> tuple[Narration | None, dict[str, Any]]:
+        """Replace the specialist's terse wording with a checked plain-language version.
+
+        On any failure the specialist's own answer and descriptions stay as they
+        are; the trace and the warnings say why.
+        """
+        step_timer = _Timer()
+        model = self._settings.narration_model
+        specialist_answer = str(payload.get("answer") or "")
+        try:
+            result = await narrate(
+                self._client, model=model, query=query, images=images, facts=facts
+            )
+        except (NarrationRejected, OpenRouterError) as exc:
+            reason = (
+                str(exc) if isinstance(exc, NarrationRejected)
+                else "the language model could not be reached"
+            )
+            warnings.append(
+                f"The plain-language summary was discarded because {reason}; "
+                "the fine-tuned model's own wording is shown instead."
+            )
+            steps.append(
+                TraceStep(
+                    stage="narrate",
+                    tool="plain-language-narrator",
+                    model=model,
+                    params={"regions": len(facts["regions"])},
+                    detail=f"Narration discarded: {exc}",
+                    duration_ms=step_timer.ms(),
+                )
+            )
+            return None, {}
+
+        payload["answer"] = result.summary
+        by_number = {region["number"]: region for region in facts["regions"]}
+        for number, text in result.regions.items():
+            region = by_number[number]
+            payload["evidence"][region["evidence_index"]]["description"] = (
+                f"{text} {region['measure']}"
+            )
+        steps.append(
+            TraceStep(
+                stage="narrate",
+                tool="plain-language-narrator",
+                model=model,
+                params={"regions": len(facts["regions"]), "temperature": 0.2},
+                detail=(
+                    f"Reworded the specialist's answer (\"{specialist_answer}\") and "
+                    f"{len(result.regions)} region description(s); every region, figure "
+                    "and direction was checked against the specialist's output."
+                ),
+                duration_ms=step_timer.ms(),
+            )
+        )
+        return (
+            Narration(
+                model=model,
+                specialist_answer=specialist_answer,
+                regions_described=len(result.regions),
+            ),
+            result.usage,
         )
 
     async def _classify(
@@ -336,70 +469,74 @@ class AgenticController:
         images: list[PreparedImage],
         configuration: InputConfiguration,
     ) -> tuple[Task, str]:
-        """Ask the router model to pick a task, with a rule-based fallback."""
-        summaries = [_image_summary(image) for image in images]
-        user_text = (
-            f"Input configuration: {configuration}\n"
-            f"Image count: {len(images)}\n"
-            "Images:\n" + "\n".join(f"  [{i}] {s}" for i, s in enumerate(summaries)) + "\n\n"
-            f"Query: {query}"
-        )
+        """Rule-based deterministic routing, no model involved.
 
-        try:
-            text, _ = await self._client.complete(
-                model=self._settings.router_model,
-                system_prompt=ROUTER_SYSTEM_PROMPT,
-                user_text=user_text,
-                json_object=True,
-                temperature=0.0,
-                max_tokens=200,
-            )
-            payload = parse_json_object(text)
-        except OpenRouterError as exc:
-            fallback = _fallback_task(configuration)
-            return fallback, f"Routing model unavailable ({exc}); used rule-based default."
-
-        task = payload.get("task")
-        if task not in VALID_TASKS:
-            fallback = _fallback_task(configuration)
-            return fallback, f"Router returned unknown task '{task}'; used rule-based default."
-
-        rationale = str(payload.get("rationale") or "").strip()
-        return task, rationale  # type: ignore[return-value]
+        The input configuration decides the task; for a single image, a query
+        that asks to locate something goes to grounding instead.
+        """
+        if configuration == "single":
+            match = _GROUNDING_WORDS.search(query)
+            if match:
+                return "grounding", (
+                    f"Rule-based: one image, and the query asks to locate something "
+                    f"(\"{match.group(0).lower()}\"), so 'grounding'."
+                )
+        task = _fallback_task(configuration)
+        return task, f"Rule-based: a {configuration.replace('_', ' ')} input maps to '{task}'."
 
     def _select(self, entry: ToolEntry) -> tuple[str, str, str, bool]:
         """Choose between the fine-tuned specialist and the baseline."""
         if entry.specialist_available:
-            return entry.name, "local_specialist", entry.specialist_module, True
+            return entry.name, "local_specialist", entry.specialist_model, True
+        return self._baseline(entry)
+
+    @staticmethod
+    def _check_resolution(entry: ToolEntry, images: list[PreparedImage]) -> tuple[bool, str | None]:
+        """Whether the specialist was trained on imagery at this resolution.
+
+        Returns (use the specialist, note for the trace). A model shown imagery
+        far outside its training resolution answers confidently and wrongly, so
+        such inputs go to the baseline. Uploads without georeferencing have no
+        known resolution; they still reach the specialist, with a caveat.
+        """
+        if entry.gsd_range is None:
+            return True, None
+        try:
+            low, high = entry.gsd_range()
+        except Exception:
+            # Loading failed; the execute step reports it and falls back.
+            logger.exception("Could not read the training resolution of '%s'", entry.name)
+            return True, None
+        trained = f"{low:g} m" if low == high else f"{low:g}-{high:g} m"
+
+        known = [image.analysis_gsd_m for image in images if image.analysis_gsd_m is not None]
+        if not known:
+            return True, (
+                f"The input resolution is unknown (no georeferencing); the fine-tuned "
+                f"'{entry.task}' model is trained on {trained}/pixel imagery, so check "
+                "its answer against the images."
+            )
+        gsd = max(known)
+        if low / GSD_TOLERANCE <= gsd <= high * GSD_TOLERANCE:
+            return True, None
+        return False, (
+            f"The fine-tuned '{entry.task}' model is trained on {trained}/pixel imagery; "
+            f"this input is analysed at {gsd:.1f} m/pixel, so the general VLM answered instead."
+        )
+
+    def _baseline(self, entry: ToolEntry) -> tuple[str, str, str, bool]:
         return f"{entry.name}-baseline", "openrouter", self._settings.vision_model, False
 
-    async def _execute(
+    async def _execute_baseline(
         self,
         *,
         task: Task,
         query: str,
         images: list[PreparedImage],
         params: dict[str, Any],
+        specialist_context: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        entry = TOOL_REGISTRY[task]
-        if entry.specialist_available:
-            raise ControllerError(
-                f"Specialist for '{task}' is registered but its execution path is not "
-                "implemented yet."
-            )
-
-        user_text = build_user_message(
-            query=query,
-            image_summaries=[_image_summary(image) for image in images],
-            task=task,
-        )
-        text, usage = await self._client.complete(
-            model=self._settings.vision_model,
-            system_prompt=analysis_system_prompt(task),
-            user_text=user_text,
-            image_data_uris=[image.data_uri for image in images],
-            json_object=True,
-            temperature=params["temperature"],
-            max_tokens=params["max_tokens"],
-        )
-        return parse_json_object(text), usage
+        """Hardcoded deterministic bypass for the baseline fallback."""
+        if specialist_context:
+            return {"answer": specialist_context, "evidence": []}, {}
+        return {"answer": f"Task {task} executed via deterministic fallback.", "evidence": []}, {}

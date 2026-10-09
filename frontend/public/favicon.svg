@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- The header's orbit mark (components/header.tsx), thickened to read at 16 px. -->
+  <rect width="32" height="32" rx="7" fill="#101518"/>
+  <g transform="translate(4 4)">
+    <ellipse cx="12" cy="12" rx="10.5" ry="4.8" transform="rotate(-28 12 12)"
+      fill="none" stroke="#fff" stroke-width="2" opacity="0.6"/>
+    <circle cx="12" cy="12" r="3.6" fill="#fff"/>
+    <circle cx="21.1" cy="6.8" r="2.3" fill="#d946ef"/>
+  </g>
+</svg>

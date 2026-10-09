@@ -8,7 +8,7 @@ An agentic, query-driven vision-language assistant for analyzing remote-sensing 
 
 ## What it does
 
-Upload satellite images — a single image, an optical + SAR pair, or two images from different dates — and ask a question in plain English:
+Upload satellite images — a single image, an optical + SAR pair, or two images from different dates — and ask a question in plain English or any of 22 Indian languages (translated with IndicTrans2):
 
 - *"Describe the land-cover and major objects visible in this image."*
 - *"Highlight the water body referred to in the query."*
@@ -16,7 +16,9 @@ Upload satellite images — a single image, an optical + SAR pair, or two images
 - *"Use the optical and SAR images together to identify built-up and water-covered regions."*
 - *"Has the built-up area increased, decreased, or remained unchanged?"*
 
-Instead of routing every query through one generic model, an **agentic controller** interprets the question, validates the inputs, and dispatches it to the right specialist model — then returns an answer backed by visual evidence (bounding boxes, masks, confidence scores) and a full, auditable trace of what it did.
+Instead of routing every query through one generic model, an **agentic controller** validates the inputs, picks the task by fixed rules, and dispatches it to the right fine-tuned specialist model — then returns an answer backed by visual evidence (bounding boxes, masks, confidence scores) and a full, auditable trace of what it did.
+
+A recorded, animated walkthrough of all three specialists is at **`/demo`** in the web app — see [Demo page](#demo-page).
 
 ### Why this matters
 
@@ -31,7 +33,8 @@ Query + Image Input (single / cross-modal / bi-temporal)
               │
               ▼
       Agentic Controller
-   (intent parsing, input validation, task routing)
+ (input validation, rule-based task routing,
+  resolution check, specialist selection)
               │
    ┌──────────┼──────────┬──────────────┐
    ▼          ▼          ▼              ▼
@@ -47,14 +50,45 @@ Captioning              (bi-temporal)   Fusion
 (answer + bbox/mask + confidence + execution trace)
 ```
 
+### Task routing
+
+The task is chosen by plain rules in the controller — no model call, so the
+same input always gets the same task:
+
+| Input | Rule | Task |
+|---|---|---|
+| One image | the question asks *where* something is (or to *find, locate, show, highlight, mark, detect* it) | Grounding |
+| One image | any other question | VQA |
+| Two images of one place, different dates | — | Change-VQA |
+| An optical and a SAR image of one place | — | Optical–SAR fusion |
+
 ### Specialist models
 
-| Task | Approach | Fine-tuned on |
-|---|---|---|
-| Visual Question Answering / Captioning | Pretrained Vision-Language Model (BLIP-2 or a remote-sensing-adapted VLM like RS-LLaVA / GeoChat) | RSVQA, VRSBench |
-| Text-guided Region Grounding | GroundingDINO / lightweight grounding head | VRSBench grounding subset |
-| Change Detection / Change-VQA | Siamese vision encoder + VLM head | CDVQA |
-| Optical–SAR Fusion | CLIP-style dual-encoder, contrastive pretraining | Sentinel-1 & 2 |
+| Task | Approach | Fine-tuned on | Measured |
+|---|---|---|---|
+| Visual Question Answering | ConvNeXt-Tiny image encoder + question encoder joined by cross-attention; classifies the answer from a fixed vocabulary (yes/no, land cover, counts) ([details](ml/vqa/README.md)) | RSVQA-LR (planned) | Not trained or wired into the backend yet |
+| Text-guided Region Grounding | GroundingDINO proposes 10 boxes, an ensemble of 5 re-rankers picks the described one ([details](docs/grounding-module-explained.md)) | VRSBench + DIOR-RSVG | 68.2% Acc@0.5 on 16,146 VRSBench validation expressions (storage tanks: 83.4%); 73.7% Acc@0.5 on 7,500 held-out DIOR-RSVG test expressions |
+| Change Detection / Change-VQA | Siamese ResNet-34 + question head; tiled change mask, each changed region named by the model ([details](ml/C_VQA/README.md)) | LEVIR-CD (0.5 m aerial) + Sentinel-2 pairs labelled with Dynamic World (10 m) | Answer accuracy 81% (Dynamic World) / 83% (LEVIR); mask F1 0.58 / 0.88 |
+| Optical–SAR Fusion | ResNet-50 dual encoder, contrastive pretraining, terrain-classification head; SAR backscatter water mask | SEN1-2 (Sentinel-1 & 2) | 84.7% SAR→optical matching on validation; SAR water share within 5.7 points of the hand labels on 8 Sen1Floods11 chips |
+
+The controller only sends imagery to a fine-tuned model when its resolution
+(read from the GeoTIFF) is close to what the model was trained on; outside that
+range the result carries a warning saying why. Every result is labelled
+"Fine-tuned model" or not.
+
+### Current limitations
+
+- **Single-image VQA / captioning** has no working specialist yet: the
+  `ml/vqa` model has no trained checkpoint, doesn't import after its last
+  rewrite, and only classifies a fixed set of answers, so it can't write
+  captions. The general-VLM fallback is switched off, so a single-image
+  question without a location word gets a placeholder answer. The same happens
+  when imagery fails the resolution check or a specialist errors.
+- **Fusion:** `checkpoints/fusion_best.pt` was trained with 4 land types
+  (agricultural, barren, grassland, urban); the "water" class added in code needs
+  a retrain. The optical-only water figure in fusion answers is a brightness
+  proxy (the images have no infrared band) and over-counts water by 37 points on
+  average; the SAR figure is the reliable one.
 
 ---
 
@@ -72,11 +106,11 @@ Captioning              (bi-temporal)   Fusion
 
 ## Tech stack
 
-- **Frontend:** Next.js / React, Leaflet or deck.gl for GeoTIFF rendering and map-based evidence overlays
-- **Backend:** FastAPI
-- **ML:** PyTorch, Hugging Face Transformers
-- **Model serving:** TorchServe / REST wrappers
-- **Report export:** PDF + GeoJSON
+- **Frontend:** React + Vite + TanStack Router, shadcn/ui, Motion; evidence boxes and change masks drawn over server-rendered previews, a before/after swipe viewer, and the `/demo` walkthrough
+- **Backend:** FastAPI, with the fine-tuned models served in-process and rule-based routing; OpenRouter is only used for the optional plain-language narration (`NARRATION_ENABLED`, off by default)
+- **Translation:** IndicTrans2 (22 Indian languages ⇄ English), in-process
+- **ML:** PyTorch, Hugging Face Transformers, one uv workspace shared with the backend
+- **Report export:** PDF (Typst)
 
 ---
 
@@ -84,12 +118,15 @@ Captioning              (bi-temporal)   Fusion
 
 ```
 /frontend              # Web app (upload, viewer, results UI)
+  /src/routes          #   index.tsx (the app), demo.tsx (the /demo walkthrough)
+  /src/components/demo #   one recorded run per specialist + shared animations
+  /public/demo         #   images and masks the demo plays back
 /backend               # FastAPI service, controller, validation, report generation
 /ml
   /datasets            # PyTorch dataset loaders (SEN1-2, BigEarthNet, etc.)
-  /vqa                 # VQA + captioning model, training and inference
+  /vqa                 # Single-image VQA model, training and inference
   /grounding           # Grounding model, training and inference
-  /change-detection    # Change VQA model, training and inference
+  /C_VQA               # Change VQA model: data pipeline, training, evaluation, inference
   /fusion              # Optical-SAR fusion model, contrastive pretraining
   /controller          # Agentic controller — intent parsing, routing, aggregation
 /data
@@ -108,7 +145,8 @@ Captioning              (bi-temporal)   Fusion
 | [SEN1-2 (Sentinel-1&2 Image Pairs)](https://www.kaggle.com/datasets/requiemonk/sentinel12-image-pairs-segregated-by-terrain) | SAR-Optical fusion, SAR analysis (16K paired SAR & optical patches, terrain-labeled) |
 | RSVQA | Visual Question Answering |
 | VRSBench | Captioning, grounding, VQA |
-| CDVQA | Change-based Visual Question Answering |
+| [LEVIR-CD](https://justchenhao.github.io/LEVIR/) | Change-VQA: building change at 0.5 m |
+| Sentinel-2 + [Dynamic World](https://dynamicworld.app/) | Change-VQA: land-cover and water change at 10 m, exported from Earth Engine |
 
 Evaluation also uses an ISRO/SAC dataset of co-registered Cartosat-2S optical and RISAT SAR image pairs (annotations not disclosed to teams).
 
@@ -160,25 +198,64 @@ sar_img, optical_img = dataset[0]  # (1,256,256) and (3,256,256) float32 tensors
 
 ---
 
+## Demo page
+
+`/demo` (linked as **How it works** in the header) is an animated, presenter-ready
+walkthrough of how a question is answered, one per input type. Each plays back a
+**real recorded run** of the pipeline, so it needs no backend, GPU or network
+during a presentation, and every number on screen came from the models.
+
+| Walkthrough | Specialist | Recorded example | Checked against |
+|---|---|---|---|
+| Before and after | Change-VQA | Brahmaputra flood in Assam (Jan vs Jul 2024), asked in Hindi | — (change mask, 8 measured regions, Hindi answer) |
+| One image | Grounding | "Where is a storage tank on the upper left?" — three tanks in one photo | DIOR-RSVG hand-labelled box: 90% overlap (IoU) |
+| Optical + radar | Optical–SAR fusion | Flooded Brahmaputra chip in Assam (Sen1Floods11) | Hand-drawn water map: 47% water vs 48% from the SAR |
+
+Each walkthrough steps through the real pipeline stages — ask (and translate),
+check the images, pick the task, choose the model, run it, answer — with the
+time each stage took in the recording.
+
+**Presenter controls:** autoplay runs through all three walkthroughs; Space
+pauses, ←/→ or a clicker's PageUp/PageDown step, Shift+←/→ switches
+walkthrough, 1–9 jump to a step, R replays a step, F enters or leaves full
+screen.
+
+**Re-recording a walkthrough** (after retraining a model): POST the same inputs to
+`/api/analyse`, save the JSON response next to the walkthrough in
+`frontend/src/components/demo/` (adding the question as `query`), and move the
+preview/mask data URIs to image files in `frontend/public/demo/`. Each
+walkthrough file (`change.tsx`, `grounding.tsx`, `fusion.tsx`) names its inputs
+in its header comment.
+
+---
+
 ## Getting started
 
 ```bash
-# Clone the repo
-git clone <repo-url>
-cd satquery-ai
+git clone https://github.com/divyptl/SIH-2026.git
+cd SIH-2026
 
-# Backend setup
+# Python: backend + ml share one uv workspace and the root .venv
+uv sync --all-packages --all-extras
+
+# Backend (see backend/README.md for .env settings and checkpoints)
 cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload
+cp .env.example .env
+uv run uvicorn main:app --reload
 
-# Frontend setup
-cd frontend
-npm install
-npm run dev
+# Frontend
+cd ../frontend
+pnpm install
+pnpm dev
 ```
 
-(Full setup instructions per module to be added as components come online — see `/docs`.)
+Open http://localhost:3000 for the app and http://localhost:3000/demo for the
+walkthrough.
+
+- Backend setup, configuration and the specialist models: [backend/README.md](backend/README.md)
+- Frontend structure and the demo page: [frontend/README.md](frontend/README.md)
+- Training and evaluating the Change-VQA model: [ml/C_VQA/README.md](ml/C_VQA/README.md)
+- Grounding model: [docs/grounding-module-explained.md](docs/grounding-module-explained.md)
 
 ---
 

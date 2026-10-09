@@ -649,8 +649,11 @@ class SiameseChangeVQA(nn.Module):
         # 6. Cross-Modal Fusion
         fused_text = self.cross_modal_fusion(query=text_tokens, visual_tokens=visual_tokens)
 
-        # Pool fused representation (e.g. SOS token or mean pool)
-        pooled = fused_text.mean(dim=1)  # (B, text_dim)
+        # Mean-pool over real tokens only. Questions fill ~10 of the 32 slots, so
+        # an unmasked mean is dominated by identical <pad> tokens and the answer
+        # head barely sees which question was asked.
+        token_mask = (question_ids != self.tokenizer.pad_id).unsqueeze(-1).to(fused_text.dtype)
+        pooled = (fused_text * token_mask).sum(dim=1) / token_mask.sum(dim=1).clamp(min=1.0)  # (B, text_dim)
 
         # 7. Answer Prediction
         logits, confidence = self.vqa_head(pooled)
@@ -805,12 +808,17 @@ class ChangeVQALoss(nn.Module):
         mask_targets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute combined loss and return scalar loss plus metric breakdown."""
-        # 1. VQA Classification Loss
-        vqa_loss = self.ce_loss(outputs["answer_logits"], answer_targets)
+        # 1. VQA Classification Loss (targets of -100 are out-of-vocabulary answers)
+        valid = answer_targets != self.ce_loss.ignore_index
+        if valid.any():
+            vqa_loss = self.ce_loss(outputs["answer_logits"], answer_targets)
+        else:
+            # CE over zero targets is NaN; keep the graph but contribute nothing
+            vqa_loss = outputs["answer_logits"].sum() * 0.0
 
         # Accuracy
         preds = outputs["answer_logits"].argmax(dim=-1)
-        vqa_acc = (preds == answer_targets).float().mean().item()
+        vqa_acc = (preds[valid] == answer_targets[valid]).float().mean().item() if valid.any() else 0.0
 
         total_loss = self.vqa_weight * vqa_loss
         metrics = {

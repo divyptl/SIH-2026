@@ -15,6 +15,12 @@ export default [
     },
   },
   {
-    ignores: ['eslint.config.js', 'prettier.config.js'],
+    ignores: [
+      'eslint.config.js',
+      'prettier.config.js',
+      // Installed from the React Bits registry via the shadcn CLI; kept as shipped.
+      'src/components/BlurText.tsx',
+      'src/components/ShinyText.tsx',
+    ],
   },
 ]

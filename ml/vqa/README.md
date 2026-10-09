@@ -1,158 +1,165 @@
-# ml/vqa — Single-Image Remote-Sensing VQA + Captioning
+# ml/vqa — Single-Image Remote-Sensing VQA
 
 **Owner:** Yashvi (AI/ML — VQA / captioning)
-**Scope:** single-image VQA and captioning only. Change detection, Change-VQA,
-optical-SAR fusion, grounding, the frontend, and the main agentic controller
-are **not** part of this module — see `ml/C_VQA` (owner: Harivansh) for
-change-related work, and don't modify it from here.
+**Scope:** single-image VQA only. Change detection, Change-VQA, optical-SAR
+fusion, grounding, the frontend, and the main agentic controller are **not**
+part of this module — see `ml/C_VQA` (owner: Harivansh) for change-related
+work, and don't modify it from here.
 
 ## What this is
 
-A specialist model for SatQuery AI (SIH26167) that answers natural-language
-questions about a single remote-sensing image, or generates a caption for it,
-using **SkyEyeGPT** (a remote-sensing-adapted VLM) run through the
-**MiniGPT-v2** runtime.
+A specialist model for SatQuery AI (SIH26167) that answers a natural-language
+question about a single remote-sensing image. It is a custom PyTorch model
+trained from an ImageNet-pretrained backbone, not a wrapper around an
+existing VLM:
 
-> The official SkyEyeGPT GitHub repo does not currently ship a complete
-> chatbot/inference codebase — it's marked "coming soon" upstream. SkyEyeGPT
-> is distributed as a checkpoint meant to run on top of MiniGPT-v2. This
-> module therefore = **MiniGPT-v2 runtime + SkyEyeGPT checkpoint + our
-> wrapper**, not a standalone SkyEyeGPT package.
+```
+Image (3, 256, 256) ──► ConvNeXt-Tiny ──► 1×1 conv projector ──► 7×7 = 49 visual tokens (256-d)
+                                                                        │
+Question ──► word tokenizer ──► text encoder (256-d, ≤ 32 tokens) ──► cross-attention
+                                                                   (2 layers, 8 heads)
+                                                                        │
+                                                          pooled ──► MLP answer head
+                                                                        │
+                                                   one of 64 answer classes + confidence
+```
+
+All hyperparameters live in `ModelConfig` (`config.py`); the backbone can be
+switched to `resnet18`, `resnet34` or `resnet50`.
+
+**The model is a classifier, not a text generator.** It picks one answer from
+a fixed vocabulary (`CANONICAL_ANSWERS` in `model.py`), which today has 24
+named answers:
+
+- `yes`, `no`
+- land use / cover: `residential`, `industrial`, `agricultural`,
+  `commercial`, `forest`, `water`, `bare land`, `road`
+- counts: `0` – `10`, `more than 10`
+- density: `sparse`, `dense`
+
+The other 40 of the 64 output slots are unnamed placeholders
+(`answer_category_24` …). "Captioning" (`--task captioning`) only sends the
+fixed question "Describe this image." through the same classifier, so it
+returns a single label, not a caption.
+
+## Status — not usable yet
+
+- **The package does not import.** Commit `558493b` rewrote `config.py` and
+  `model.py`, but `__init__.py`, `inference.py`, `preprocessing.py` and
+  `test_vqa.py` still import names that no longer exist:
+  `VQAConfig`, `DEFAULT_CONFIG`, `SUPPORTED_MODALITIES`,
+  `SUPPORTED_EXTENSIONS`, `DEFAULT_MULTISPECTRAL_RGB_BANDS` (from
+  `config.py`) and `BaseVQAModel`, `SkyEyeGPTModel` (from `model.py`).
+  Because `ml/vqa/__init__.py` fails, `python -m ml.vqa.training.train`
+  fails too.
+- **No trained checkpoint.** Nothing exists under `checkpoints/vqa/`.
+- **No measured accuracy.** There is no RSVQA / VRSBench result for this
+  model yet — don't quote one.
+- **Not wired into the backend.** The tool registry lists `vqa` and
+  `caption` with `specialist_module="ml.vqa"`, but no specialist is
+  attached, so single-image questions get the deterministic fallback answer
+  (see `backend/README.md`).
+- **Unknown answers are labelled `yes`.** `VQADataset` maps any answer
+  outside `CANONICAL_ANSWERS` to class 0. RSVQA-LR contains many such
+  answers (area ranges, counts above 10), so extend the vocabulary or drop
+  those questions before training.
+- **Leftovers from the earlier SkyEyeGPT / MiniGPT-v2 plan:** `confidence.py`
+  (not used by the new model), `training/lora_config.py` (stub), and the
+  MiniGPT / `peft` / `bitsandbytes` entries in `requirements.txt`.
 
 ## File layout
 
 ```
 ml/vqa/
-├── __init__.py        # public API: VQAModel, BaseVQAModel, SkyEyeGPTModel
-├── config.py           # paths, device, generation params, prompts
-├── model.py            # BaseVQAModel interface + SkyEyeGPTModel backend
-├── inference.py        # predict(ModelRequest) -> ModelResponse + CLI
-├── preprocessing.py     # format detection, GeoTIFF/rasterio, RGB normalization
-├── confidence.py        # documented, non-fabricated confidence scoring
-├── evaluate.py          # RSVQA / VRSBench evaluation harness
-├── test_vqa.py           # unit tests (fake backend, no GPU needed)
+├── __init__.py          # public API (currently broken — see Status)
+├── config.py            # ModelConfig (architecture) + TrainConfig (training)
+├── model.py             # VisionBackbone, SimpleTokenizer, TextEncoder,
+│                        # CrossModalFusion, VQAHead, VQAModel, VQALoss
+├── inference.py         # VQAModel.predict(ModelRequest) -> ModelResponse + CLI
+├── preprocessing.py     # format detection, GeoTIFF via rasterio, RGB normalization
+├── evaluate.py          # RSVQA-LR/HR and VRSBench accuracy harness
+├── confidence.py        # unused — from the SkyEyeGPT plan
+├── test_vqa.py          # unit tests (need updating for the new model)
 ├── requirements.txt
-├── README.md            # this file
-└── training/             # Phase 4 stubs only — not wired in yet
-    ├── __init__.py
-    ├── dataset.py
-    ├── lora_config.py
-    └── train.py
+└── training/
+    ├── dataset.py       # VQADataset over a JSONL manifest
+    ├── train.py         # training loop
+    └── lora_config.py   # unused stub
 ```
 
-`checkpoints/SkyEyeGPT.pth` (~680MB) is **not** included and must not be
-committed — download it separately (see Setup) and add it to `.gitignore`.
+## Data
 
-## Setup
+Training and evaluation both read a flat JSONL manifest at
+`{data_root}/{split}.jsonl`, one record per line:
 
-1. **Clone MiniGPT-v2** (not pip-installable):
-   ```bash
-   git clone https://github.com/Vision-CAIR/MiniGPT-4 third_party/MiniGPT-4
-   export MINIGPT_REPO_DIR=$(pwd)/third_party/MiniGPT-4
-   ```
-   Follow that repo's own instructions to get its base LLM weights and
-   `eval_configs/minigptv2_eval.yaml` in place.
+```json
+{"image": "path/to/img.jpg", "question": "Is there a road?", "answer": "yes", "modality": "optical"}
+```
 
-2. **Download the SkyEyeGPT checkpoint** from its Hugging Face repo into
-   `checkpoints/SkyEyeGPT.pth` (or set `SATQUERY_CHECKPOINTS_DIR`). Point
-   `minigptv2_eval.yaml`'s `model.ckpt` field at this file.
+RSVQA and VRSBench ship their own formats, and no converter exists in the
+repo yet; RSVQA-LR is not in `data/` either. Write a one-off converter that
+produces `train.jsonl`, `val.jsonl` and `test.jsonl`.
 
-3. **Install this module's requirements**, plus MiniGPT-4's own
-   `requirements.txt` from inside its cloned repo:
-   ```bash
-   pip install -r ml/vqa/requirements.txt
-   pip install -r third_party/MiniGPT-4/requirements.txt
-   ```
-
-4. Add to `.gitignore` (repo root):
-   ```
-   checkpoints/
-   third_party/
-   ```
-
-## Roadmap (do these in order — don't skip ahead)
-
-1. **Phase 1 — Prove basic inference works.** Load MiniGPT-v2 + the
-   SkyEyeGPT checkpoint, run one image + one question through it, confirm
-   you get a sane answer. No FastAPI, no training, no controller yet.
-2. **Phase 2 — Wrapper.** `SkyEyeGPTModel` (`model.py`) with
-   `answer()` / `caption()` / `generate()`.
-3. **Phase 3 — SatQuery schema.** `VQAModel.predict()` (`inference.py`)
-   implementing `ModelRequest -> ModelResponse` per
-   `ml/controller/schema.py`.
-4. **Phase 4 — Preprocessing.** RGB/PNG/JPEG + GeoTIFF, documented
-   multispectral/SAR-to-RGB visualization (`preprocessing.py`).
-5. **Phase 5 — Tests + CLI.** Already scaffolded in `test_vqa.py` and
-   `inference.py`'s `__main__`.
-6. **Phase 6 — Evaluation.** RSVQA-LR/HR and VRSBench, via
-   `evaluate.py` and/or VRSBench's own official evaluation notebooks.
-7. **Phase 7 — LoRA / domain adaptation.** Only after a baseline number
-   exists. Stubs live in `training/` and deliberately raise
-   `NotImplementedError` until then.
-8. **Phase 8 — Controller integration.** Register `"vqa"` and
-   `"captioning"` task hints against `VQAModel` in the agentic controller.
-
-If a dependency/API from SkyEyeGPT or MiniGPT-v2 has changed since this was
-written, check the actual upstream source before assuming this code is
-correct — several comments in `model.py` flag exactly which calls to verify.
-
-## CLI
+## Training
 
 ```bash
-python -m ml.vqa.inference --image sample.jpg --query "What type of land cover is visible?"
-python -m ml.vqa.inference --image sample.jpg --task captioning
+python -m ml.vqa.training.train --data-root data/rsvqa-lr --epochs 30 --batch-size 16 --lr 1e-4
+```
+
+Defaults (`TrainConfig`): 256×256 input with colour-jitter augmentation,
+AdamW with lr 1e-4 for the heads and 2e-5 for the pretrained backbone,
+weight decay 1e-4, mixed precision on CUDA, and `DataParallel` when more
+than one GPU is visible. Each epoch is validated on exact-match answer
+accuracy, and the best epoch is saved to `checkpoints/vqa/best.pt` with its
+`ModelConfig`, which `VQAModel.from_checkpoint()` reads back.
+
+## Inference
+
+```bash
+python -m ml.vqa.inference --image sample.jpg --query "Is there a water body?"
+```
+
+`inference.VQAModel` loads `checkpoints/vqa/best.pt` if it exists and
+otherwise runs **untrained weights** (it logs a warning), so its answers mean
+nothing until a checkpoint is trained. Images are resized to 256×256 and
+ImageNet-normalized.
+
+## Evaluation
+
+```bash
+python -m ml.vqa.evaluate --dataset rsvqa-lr --split test \
+    --data-root data/rsvqa-lr --checkpoint checkpoints/vqa/best.pt \
+    --out docs/vqa_results.md
 ```
 
 ## Confidence — read before trusting the number
 
-`ModelResponse.confidence` is **not** a calibrated probability of
-correctness. SkyEyeGPT doesn't give us one just because it generated fluent
-text. `confidence.py` either:
-- rescales an average token log-probability if the backend exposes one, or
-- falls back to a coarse text heuristic (empty/refusal → low, hedged →
-  medium-low, direct answer → medium).
-
-Treat it as a triage/ranking signal only. Don't quote it as "the model is
-X% confident it's correct" in any report — see Section 23/28 of the
-project spec for the reasoning and the roadmap toward a real calibration
-method (self-consistency, answerability checks, specialist cross-validation).
+`confidence` is the highest softmax probability over the 64 answer classes.
+It is not calibrated: treat it as a ranking signal, not as "X% likely to be
+correct", until it has been checked against held-out accuracy.
 
 ## Modality caveats
 
 - **Multispectral GeoTIFF** is converted to an RGB composite using a
-  **documented** band mapping (`config.DEFAULT_MULTISPECTRAL_RGB_BANDS`,
-  default `(3, 2, 1)` = R, G, B 1-indexed band positions). This is a
-  visualization choice, not true multispectral understanding — state the
-  mapping used whenever you report results.
-- **SAR** input goes through the same pipeline as a 1-band grayscale
-  visualization. This is **not** native SAR understanding. Don't claim
-  "the model supports SAR" on this basis; SAR-specific analysis belongs to
-  the fusion specialist in the full SatQuery pipeline.
+  documented band mapping (default `(3, 2, 1)` = R, G, B as 1-indexed band
+  positions). This is a visualization choice, not multispectral
+  understanding — state the mapping whenever you report results.
+- **SAR** goes through the same pipeline as a 1-band grayscale image. The
+  model is trained on optical RGB, so this is **not** SAR understanding;
+  SAR analysis belongs to the fusion specialist.
 
 ## Error handling
 
-`VQAModel.predict()` never raises for expected bad input — it returns a
-`ModelResponse` with `answer="ERROR: ..."` and `confidence=0.0` for:
-no image, more than one image (routes the user toward Change-VQA instead),
-unsupported modality, unsupported file format, unreadable/corrupted image,
-unsupported band count, and empty query in VQA mode. See `test_vqa.py` for
-the full matrix.
+`VQAModel.predict()` doesn't raise for bad input; it returns a
+`ModelResponse` with `answer="ERROR: ..."` and `confidence=0.0` for: no
+image, more than one image (that belongs to Change-VQA), an unsupported
+modality, an unsupported file format, an unreadable image, or an unsupported
+band count.
 
 ## What this module deliberately does NOT do
 
-- Train a VLM from scratch, or build a new 7B/13B model.
 - Modify `ml/C_VQA` (Change-VQA — different owner, different interface).
 - Implement change detection, optical-SAR fusion, grounding, the frontend,
   or the main controller.
-- Assume SkyEyeGPT natively handles arbitrary multispectral/SAR data.
 - Commit model weights to git.
-- Invent MiniGPT-v2/SkyEyeGPT APIs — where this code makes an assumption
-  about upstream API shape, it's called out in a comment for you to verify.
 - Fabricate confidence scores or benchmark numbers.
-
-## Extending to another backbone
-
-`model.py` separates `BaseVQAModel` (interface) from `SkyEyeGPTModel`
-(implementation) specifically so GeoChat, RS-LLaVA, or BLIP-2 can be
-swapped in later by adding a new `BaseVQAModel` subclass — `inference.py`
-and the controller integration don't need to change.

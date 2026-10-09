@@ -29,9 +29,15 @@ export interface BoundingBox {
   y_max: number
 }
 
+/** A change mask: a PNG data URI, opaque where the model predicts change. */
+export interface ChangeMask {
+  png: string
+}
+
 export interface Evidence {
   type: 'bbox' | 'mask' | 'heatmap' | 'observation'
-  data: BoundingBox | null
+  /** A box for `bbox`, a mask for `mask`, otherwise null. */
+  data: BoundingBox | ChangeMask | null
   description: string
   label: string | null
   confidence: number | null
@@ -48,13 +54,22 @@ export interface ImageInfo {
   height: number
   size_bytes: number
   is_georeferenced: boolean
+  /** Metres per pixel from the GeoTIFF tags; null when unknown. */
+  ground_sample_distance_m: number | null
   notes: Array<string>
   /** Server-rendered JPEG of exactly what the model was shown. */
   preview_data_uri: string | null
 }
 
 export interface TraceStep {
-  stage: 'validate' | 'classify' | 'select' | 'execute' | 'aggregate'
+  stage:
+    | 'translate'
+    | 'validate'
+    | 'classify'
+    | 'select'
+    | 'execute'
+    | 'narrate'
+    | 'aggregate'
   tool: string
   model: string | null
   params: Record<string, unknown>
@@ -81,6 +96,39 @@ export interface Usage {
   cost: number | null
 }
 
+/** What the translation layer did; `answer`/`evidence` stay in English. */
+export interface TranslationInfo {
+  engine: string
+  /** Language code the query was read as. */
+  source_language: string
+  /** True when inferred from the script rather than the language hint. */
+  source_detected: boolean
+  /** Language code the answer was translated to. */
+  target_language: string
+  original_query: string
+  english_query: string
+  /** Answer in `target_language`; null if back-translation failed. */
+  answer: string | null
+  /** Index-aligned with `evidence`; null if back-translation failed. */
+  evidence_descriptions: Array<string> | null
+  /** Index-aligned with `evidence`; null if back-translation failed. */
+  evidence_labels?: Array<string | null> | null
+  /** Index-aligned with `trace.warnings`; null if back-translation failed. */
+  warnings?: Array<string> | null
+  routing_rationale?: string | null
+}
+
+/**
+ * A VLM's plain-language rewording of a specialist result. The wording is the
+ * VLM's; every region and figure in it was checked against the specialist.
+ */
+export interface Narration {
+  model: string
+  /** The specialist's own answer, before rewording. */
+  specialist_answer: string
+  regions_described: number
+}
+
 export interface AnalysisResponse {
   request_id: string
   task: Task
@@ -92,21 +140,9 @@ export interface AnalysisResponse {
   inputs: Array<ImageInfo>
   trace: ExecutionTrace
   usage: Usage | null
-}
-
-export const TASK_LABELS: Record<Task, string> = {
-  vqa: 'Visual question answering',
-  caption: 'Scene description',
-  grounding: 'Region grounding',
-  change_vqa: 'Change VQA',
-  change_description: 'Change description',
-  fusion: 'Optical–SAR fusion',
-}
-
-export const CONFIGURATION_LABELS: Record<InputConfiguration, string> = {
-  single: 'Single image',
-  cross_modal_pair: 'Cross-modal pair',
-  bi_temporal_pair: 'Bi-temporal pair',
+  translation: TranslationInfo | null
+  /** Set when a VLM reworded the specialist's result in plain language. */
+  narration?: Narration | null
 }
 
 /** An error carrying the HTTP status, so callers can distinguish causes. */
@@ -150,6 +186,11 @@ export interface AnalyseArgs {
   modalities?: Array<Modality>
   /** Optional task override; omit to let the controller route. */
   task?: Task
+  /**
+   * The user's language code (see `src/lib/languages.ts`). Non-English queries
+   * are translated to English server-side, and the answer is translated back.
+   */
+  language?: string
   signal?: AbortSignal
 }
 
@@ -158,6 +199,7 @@ export async function analyse({
   images,
   modalities,
   task,
+  language,
   signal,
 }: AnalyseArgs): Promise<AnalysisResponse> {
   const body = new FormData()
@@ -165,6 +207,7 @@ export async function analyse({
   for (const image of images) body.append('images', image)
   if (modalities?.length) body.append('modalities', modalities.join(','))
   if (task) body.append('task', task)
+  if (language) body.append('language', language)
 
   let response: Response
   try {
@@ -191,4 +234,73 @@ export async function analyse({
   }
 
   return (await response.json()) as AnalysisResponse
+}
+
+/** Every string the PDF report prints, already in the report's language. */
+export interface ReportLabels {
+  title: string
+  generated: string
+  request: string
+  question: string
+  query_translated: string
+  answer: string
+  english_original: string
+  task: string
+  task_name: string
+  input: string
+  configuration_name: string
+  confidence: string
+  time: string
+  tokens: string
+  language: string
+  language_name: string
+  images: string
+  /** Contains an `{{index}}` placeholder. */
+  image: string
+  modality: Record<Modality, string>
+  georeferenced: string
+  evidence: string
+  /** Contains an `{{index}}` placeholder. */
+  region: string
+  no_spatial: string | null
+  controller_notes: string
+  trace: string
+  routing: string
+  tools: string
+}
+
+export interface ReportArgs {
+  result: AnalysisResponse
+  /** The question exactly as the user typed it. */
+  query: string
+  /** The report's language; `'en'` renders the English original only. */
+  language: string
+  labels: ReportLabels
+}
+
+/** Typeset a result into a PDF on the server and return it as a Blob. */
+export async function downloadReport(args: ReportArgs): Promise<Blob> {
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE_URL}/api/report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+    })
+  } catch {
+    throw new ApiError(
+      `Could not reach the SatQuery API at ${API_BASE_URL}. Is the backend running?`,
+      0,
+    )
+  }
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null)
+    throw new ApiError(
+      extractDetail(payload, `Report failed (HTTP ${response.status}).`),
+      response.status,
+    )
+  }
+
+  return response.blob()
 }

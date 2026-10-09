@@ -10,6 +10,7 @@ image normalization.
 from __future__ import annotations
 
 import random
+import re
 
 import torch
 import torchvision.transforms.functional as TF
@@ -47,18 +48,20 @@ class GroundingAugmentation:
         self,
         image: "Image.Image",
         boxes: torch.Tensor,
-    ) -> tuple["Image.Image", torch.Tensor]:
-        """Augment an image and its boxes.
+        text: str = "",
+    ) -> tuple["Image.Image", torch.Tensor, str]:
+        """Augment an image, its boxes and the referring expression.
 
         Args:
             image: PIL RGB image.
             boxes: (N, 4) tensor in (cx, cy, w, h) format, normalized 0–1.
+            text: Referring expression for the boxes.
 
         Returns:
-            (augmented_image, augmented_boxes)
+            (augmented_image, augmented_boxes, augmented_text)
         """
         if not self.augment:
-            return image, boxes
+            return image, boxes, text
 
         # Random horizontal flip (50% chance)
         if random.random() < 0.5:
@@ -66,6 +69,10 @@ class GroundingAugmentation:
             # Flip cx: new_cx = 1.0 - cx
             boxes = boxes.clone()
             boxes[:, 0] = 1.0 - boxes[:, 0]
+            # ~63% of VRSBench train expressions say "left"/"right". Without
+            # swapping them the flipped box contradicts the text, which stalls
+            # box regression (train loss_bbox stayed flat at ~4x val).
+            text = swap_left_right(text)
 
         # Random color jitter (photometric — no box update needed)
         if random.random() < 0.5:
@@ -79,7 +86,24 @@ class GroundingAugmentation:
         if random.random() < 0.1 and ImageFilter is not None:
             image = image.filter(ImageFilter.GaussianBlur(radius=1))
 
-        return image, boxes
+        return image, boxes, text
+
+
+_LEFT_RIGHT_RE = re.compile(r"\b(left|right)", re.IGNORECASE)
+
+
+def swap_left_right(text: str) -> str:
+    """Swap left/right in a referring expression to match a horizontal flip.
+
+    Matches word prefixes, so "leftmost", "right-most" and "top-left" all swap,
+    and keeps the capitalisation of the first letter.
+    """
+    def swap(match: re.Match) -> str:
+        word = match.group(1)
+        new = "right" if word.lower() == "left" else "left"
+        return new.capitalize() if word[0].isupper() else new
+
+    return _LEFT_RIGHT_RE.sub(swap, text)
 
 
 def uniform(low: float, high: float) -> float:
@@ -122,15 +146,18 @@ def prepare_training_batch(
     if augmentation is not None:
         aug_images = []
         aug_labels = []
-        for img, lbl in zip(images, labels):
-            aug_img, aug_boxes = augmentation(img, lbl["boxes"])
+        aug_texts = []
+        for img, lbl, text in zip(images, labels, texts):
+            aug_img, aug_boxes, aug_text = augmentation(img, lbl["boxes"], text)
             aug_images.append(aug_img)
             aug_labels.append({
                 "class_labels": lbl["class_labels"],
                 "boxes": aug_boxes,
             })
+            aug_texts.append(aug_text)
         images = aug_images
         labels = aug_labels
+        texts = aug_texts
 
     # Build the GroundingDINO prompt here rather than letting the processor
     # infer it. The processor treats a list of period-free strings as candidate

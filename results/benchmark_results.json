@@ -1,0 +1,16 @@
+{
+  "grounding": {},
+  "change_vqa": {
+    "vqa_acc": 93.78,
+    "mask_iou": 80.86,
+    "mask_f1": null,
+    "source": "training epoch 10"
+  },
+  "fusion": {
+    "s2o_r1": 79.5,
+    "o2s_r1": 77.44,
+    "terrain_acc": 99.88,
+    "val_loss": 0.697,
+    "epoch": 48
+  }
+}
