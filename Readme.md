@@ -3,8 +3,8 @@
 An agentic, query-driven vision-language assistant for analyzing remote-sensing imagery through natural-language questions.
 
 **Smart India Hackathon 2026 — Problem Statement:** SatQuery AI (ISRO/SAC)
-
 ---
+![Home page](/docs/screenshots/Homepage.png)
 
 ## What it does
 
