@@ -11,8 +11,9 @@ import json
 import re
 from typing import Any
 
+# pyrefly: ignore[missing-import]
 from openrouter import OpenRouter
-
+# pyrefly: ignore[missing-import]
 from config import Settings
 
 # Models often wrap JSON in a ``` fence even when asked not to.

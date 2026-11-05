@@ -1,20 +1,7 @@
-"""The agentic controller.
-
-Implements the orchestration loop the problem statement specifies:
-
-1. check the number, modality, format, and compatibility of the input images;
-2. interpret the query and classify the requested task;
-3. select one or more tools from the registry;
-4. configure only permitted parameters and execute the workflow;
-5. combine textual and spatial outputs and estimate confidence;
-6. emit an auditable execution trace.
-
-Internal planning is not part of the contract -- only the observable trace is.
-"""
-
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import time
@@ -44,28 +31,22 @@ from services.openrouter_client import OpenRouterClient, OpenRouterError
 
 logger = logging.getLogger("satquery.controller")
 
-# A specialist accepts imagery up to this factor finer or coarser than the
-# range it was trained on; training applies resolution augmentation of up to 4x.
 GSD_TOLERANCE = 2.0
-
 VALID_TASKS: set[str] = set(TOOL_REGISTRY)
 
-# A question about one image that asks to locate something goes to grounding.
-# Matched on the English query (after translation), as whole words.
 _GROUNDING_WORDS = re.compile(
     r"\b(where|locate|locating|find|finding|show|highlight|point out|mark|detect|"
     r"box|which part|position of|location of)\b",
     re.IGNORECASE,
 )
+_PHYSICS_KEYWORDS = ("water", "flood", "built", "vegetation")
 
 
 class ControllerError(RuntimeError):
-    """Raised when the workflow cannot be completed."""
+    pass
 
 
 class _Timer:
-    """Wall-clock timer for one trace step."""
-
     def __init__(self) -> None:
         self._start = time.perf_counter()
 
@@ -74,15 +55,9 @@ class _Timer:
 
 
 def classify_input_configuration(images: list[PreparedImage]) -> InputConfiguration:
-    """Decide the input configuration from the uploads alone.
-
-    Deterministic on purpose: the number and modality of images is a fact about
-    the request, so it is never delegated to the model.
-    """
     if len(images) == 1:
         return "single"
-    modalities = {image.info.modality for image in images}
-    if modalities == {"optical", "sar"}:
+    if {img.info.modality for img in images} == {"optical", "sar"}:
         return "cross_modal_pair"
     return "bi_temporal_pair"
 
@@ -90,29 +65,18 @@ def classify_input_configuration(images: list[PreparedImage]) -> InputConfigurat
 def _fallback_task(configuration: InputConfiguration) -> Task:
     if configuration == "single":
         return DEFAULT_SINGLE_TASK
-    if configuration == "cross_modal_pair":
-        return "fusion"
-    return DEFAULT_PAIR_TASK
+    return "fusion" if configuration == "cross_modal_pair" else DEFAULT_PAIR_TASK
 
 
 def _coerce_confidence(raw: Any) -> float:
     try:
-        value = float(raw)
+        val = float(raw)
     except (TypeError, ValueError):
         return 0.5
-    if value > 1.0:
-        # Some models answer on a 0-100 scale despite the instruction.
-        value = value / 100.0
-    return max(0.0, min(1.0, value))
+    return max(0.0, min(1.0, val / 100.0 if val > 1.0 else val))
 
 
 def _coerce_evidence(raw: Any, image_count: int) -> list[Evidence]:
-    """Normalise the model's evidence list, dropping anything malformed.
-
-    Bad boxes are discarded rather than clamped: a box the model could not
-    express correctly is not evidence, and silently reshaping it would make
-    the overlay lie about where the model actually looked.
-    """
     if not isinstance(raw, list):
         return []
 
@@ -120,53 +84,45 @@ def _coerce_evidence(raw: Any, image_count: int) -> list[Evidence]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-
         description = str(item.get("description") or item.get("label") or "").strip()
         if not description:
             continue
 
-        index = item.get("image_index", 0)
         try:
-            image_index = int(index)
+            image_index = int(item.get("image_index", 0))
+            if not 0 <= image_index < image_count:
+                image_index = 0
         except (TypeError, ValueError):
             image_index = 0
-        if not 0 <= image_index < image_count:
-            image_index = 0
 
-        box = item.get("box")
         data: Any = None
         kind = "observation"
+        box = item.get("box")
         if isinstance(box, dict):
             try:
-                coords = {key: float(box[key]) for key in ("x_min", "y_min", "x_max", "y_max")}
+                coords = {k: float(box[k]) for k in ("x_min", "y_min", "x_max", "y_max")}
+                if (
+                    all(0.0 <= v <= 1.0 for v in coords.values())
+                    and coords["x_max"] > coords["x_min"]
+                    and coords["y_max"] > coords["y_min"]
+                ):
+                    data, kind = coords, "bbox"
             except (KeyError, TypeError, ValueError):
-                coords = None
-            if (
-                coords
-                and all(0.0 <= value <= 1.0 for value in coords.values())
-                and coords["x_max"] > coords["x_min"]
-                and coords["y_max"] > coords["y_min"]
-            ):
-                data = coords
-                kind = "bbox"
+                pass
 
-        # A change mask from a specialist, as a PNG data URI (never from the VLM).
         mask = item.get("mask")
         if kind == "observation" and isinstance(mask, str) and mask.startswith("data:image/png;base64,"):
-            data = {"png": mask}
-            kind = "mask"
+            data, kind = {"png": mask}, "mask"
 
         label = item.get("label")
-        confidence = item.get("confidence")
+        conf = item.get("confidence")
         evidence.append(
             Evidence(
                 type=kind,
                 data=data,
                 description=description,
                 label=str(label).strip() if label else None,
-                confidence=(
-                    _coerce_confidence(confidence) if confidence is not None else None
-                ),
+                confidence=_coerce_confidence(conf) if conf is not None else None,
                 image_index=image_index,
             )
         )
@@ -174,8 +130,6 @@ def _coerce_evidence(raw: Any, image_count: int) -> list[Evidence]:
 
 
 class AgenticController:
-    """Routes a query and its imagery through the appropriate workflow."""
-
     def __init__(self, settings: Settings, client: OpenRouterClient) -> None:
         self._settings = settings
         self._client = client
@@ -191,65 +145,55 @@ class AgenticController:
         steps: list[TraceStep] = []
         warnings: list[str] = []
 
-        # --- 1. Validate inputs and their compatibility ----------------------
+        # 1. Validate inputs
         step_timer = _Timer()
         configuration = classify_input_configuration(images)
         warnings.extend(check_pair_compatibility(images))
-        for image in images:
-            warnings.extend(image.info.notes)
+        for img in images:
+            warnings.extend(img.info.notes)
         steps.append(
             TraceStep(
                 stage="validate",
                 tool="input-validator",
                 params={
                     "image_count": len(images),
-                    "modalities": [image.info.modality for image in images],
-                    "formats": [image.info.detected_format for image in images],
+                    "modalities": [img.info.modality for img in images],
+                    "formats": [img.info.detected_format for img in images],
                 },
                 detail=f"Resolved input configuration: {configuration}.",
                 duration_ms=step_timer.ms(),
             )
         )
 
-        # --- 2. Classify the requested task ----------------------------------
+        # 2. Classify task
         step_timer = _Timer()
         if task_override:
             if task_override not in VALID_TASKS:
-                raise ControllerError(
-                    f"Unknown task '{task_override}'. Valid tasks: {sorted(VALID_TASKS)}."
-                )
+                raise ControllerError(f"Unknown task '{task_override}'. Valid tasks: {sorted(VALID_TASKS)}.")
             task: Task = task_override  # type: ignore[assignment]
-            task_source: str = "override"
-            rationale = "Task explicitly supplied by the client."
-            router_model = None
+            task_source, rationale = "override", "Task explicitly supplied by the client."
         else:
             task, rationale = await self._classify(query, images, configuration)
             task_source = "auto"
-            # Routing is plain code; no model is involved.
-            router_model = None
 
         entry = TOOL_REGISTRY[task]
         if configuration not in entry.accepts:
             corrected = _fallback_task(configuration)
-            warnings.append(
-                f"Task '{task}' cannot run on a {configuration} input; "
-                f"fell back to '{corrected}'."
-            )
-            task = corrected
-            entry = TOOL_REGISTRY[task]
+            warnings.append(f"Task '{task}' cannot run on a {configuration} input; fell back to '{corrected}'.")
+            task, entry = corrected, TOOL_REGISTRY[corrected]
 
         steps.append(
             TraceStep(
                 stage="classify",
                 tool="query-router",
-                model=router_model,
+                model=None,
                 params={"input_configuration": configuration},
                 detail=f"Task '{task}' ({task_source}). {rationale}",
                 duration_ms=step_timer.ms(),
             )
         )
 
-        # --- 3. Select the tool ----------------------------------------------
+        # 3. Select tool
         step_timer = _Timer()
         use_specialist = entry.specialist_available
         if use_specialist:
@@ -270,19 +214,18 @@ class AgenticController:
             )
         )
 
-        # --- 4. Execute -------------------------------------------------------
+        # 4. Execute
         step_timer = _Timer()
         payload: dict[str, Any] | None = None
         specialist_payload: dict[str, Any] | None = None
         usage: dict[str, Any] = {}
         params: dict[str, Any]
+
         if domain_adapted and entry.runner is not None:
             params = {"checkpoint": entry.checkpoint}
             try:
                 payload = await asyncio.to_thread(entry.runner, query, images)
             except Exception as exc:
-                # A broken specialist must not take the request down with it; the
-                # trace says plainly that the baseline answered instead.
                 logger.exception("Specialist '%s' failed; using the baseline", tool_name)
                 warnings.append(
                     f"The fine-tuned specialist for '{task}' failed ({exc}); "
@@ -290,33 +233,20 @@ class AgenticController:
                 )
                 tool_name, backend, model_name, domain_adapted = self._baseline(entry)
 
-            # Hybrid execution: the specialist returned evidence but no answer.
-            # Save the specialist payload and fall through to the VLM baseline
-            # which will receive the specialist's context in its prompt.
             if payload is not None and not payload.get("answer"):
-                specialist_payload = payload
-                payload = None  # trigger VLM baseline below
+                specialist_payload, payload = payload, None
 
         if payload is None:
             params = {"temperature": 0.2, "max_tokens": 1400}
-            specialist_context = (
-                specialist_payload.get("specialist_context")
-                if specialist_payload
-                else None
-            )
             payload, usage = await self._execute_baseline(
                 task=task,
                 query=query,
                 images=images,
                 params=params,
-                specialist_context=specialist_context,
+                specialist_context=specialist_payload.get("specialist_context") if specialist_payload else None,
             )
-            # Merge specialist evidence (terrain probs, similarity) ahead of
-            # any evidence the VLM itself produced, so the user sees both.
             if specialist_payload is not None:
-                sp_evidence = specialist_payload.get("evidence", [])
-                payload["evidence"] = sp_evidence + (payload.get("evidence") or [])
-                # Prefer the specialist's confidence when the VLM omits one.
+                payload["evidence"] = specialist_payload.get("evidence", []) + (payload.get("evidence") or [])
                 if payload.get("confidence") is None and specialist_payload.get("confidence") is not None:
                     payload["confidence"] = specialist_payload["confidence"]
 
@@ -331,30 +261,28 @@ class AgenticController:
             )
         )
 
-        # --- 5. Put a specialist's findings into plain language ---------------
+        # 5. Plain-language narration
         narration: Narration | None = None
         facts = payload.pop("narration_facts", None)
         if facts and facts["regions"] and self._settings.narration_enabled:
             narration, narration_usage = await self._narrate(
-                query=query, images=images, payload=payload, facts=facts,
-                steps=steps, warnings=warnings,
+                query=query, images=images, payload=payload, facts=facts, steps=steps, warnings=warnings
             )
             if narration_usage and not usage:
                 usage = narration_usage
 
-        # --- 6. Aggregate outputs and confidence ------------------------------
+        # 6. Aggregate outputs and confidence
         step_timer = _Timer()
         answer = str(payload.get("answer") or "").strip()
         if not answer:
             raise ControllerError("The model returned an empty answer.")
 
-        # The model's own score, as reported; only a missing one is filled in.
         if payload.get("confidence") is None:
             warnings.append("The model did not report a confidence score; 0.5 is shown.")
         confidence = _coerce_confidence(payload.get("confidence"))
         evidence = _coerce_evidence(payload.get("evidence"), len(images))
-
         boxes = sum(1 for item in evidence if item.type == "bbox")
+
         steps.append(
             TraceStep(
                 stage="aggregate",
@@ -365,6 +293,50 @@ class AgenticController:
             )
         )
 
+        # 7. Physics Verification Intercept
+        step_timer = _Timer()
+        query_lower = query.lower()
+        if any(k in query_lower for k in _PHYSICS_KEYWORDS):
+            try:
+                from services.physics_service import process_image_physics, run_verification
+
+                raw_bytes = base64.b64decode(images[0].data_uri.split(",", 1)[1])
+                physics_context = process_image_physics(raw_bytes, query)
+                h, w = physics_context["vlm_input"].shape[:2]
+
+                first_box = next((ev.data for ev in evidence if ev.type == "bbox" and ev.data), None)
+                vlm_bbox = (
+                    (
+                        int(first_box["x_min"] * w),
+                        int(first_box["y_min"] * h),
+                        int(first_box["x_max"] * w),
+                        int(first_box["y_max"] * h),
+                    )
+                    if first_box
+                    else None
+                )
+
+                ver_result = run_verification(
+                    query=query,
+                    vlm_confidence=confidence,
+                    vlm_bbox=vlm_bbox,
+                    physics_context=physics_context,
+                )
+                if ver_result:
+                    confidence = ver_result.verified_confidence
+                    warnings.append(f"Physics Verifier [{ver_result.status}]: {ver_result.audit_explanation}")
+                    steps.append(
+                        TraceStep(
+                            stage="verification",
+                            tool="physics-verifier",
+                            params={"claim": ver_result.claim_type, "modality_used": ver_result.modality_used},
+                            detail=ver_result.audit_explanation,
+                            duration_ms=step_timer.ms(),
+                        )
+                    )
+            except Exception as exc:
+                logger.error("Physics verification pipeline bypassed or failed: %s", exc)
+
         total_ms = overall.ms()
         return AnalysisResponse(
             request_id=uuid.uuid4().hex[:12],
@@ -374,7 +346,7 @@ class AgenticController:
             evidence=evidence,
             model_name=model_name,
             execution_time_ms=total_ms,
-            inputs=[image.info for image in images],
+            inputs=[img.info for img in images],
             trace=ExecutionTrace(
                 input_configuration=configuration,
                 task=task,
@@ -400,23 +372,13 @@ class AgenticController:
         steps: list[TraceStep],
         warnings: list[str],
     ) -> tuple[Narration | None, dict[str, Any]]:
-        """Replace the specialist's terse wording with a checked plain-language version.
-
-        On any failure the specialist's own answer and descriptions stay as they
-        are; the trace and the warnings say why.
-        """
         step_timer = _Timer()
         model = self._settings.narration_model
         specialist_answer = str(payload.get("answer") or "")
         try:
-            result = await narrate(
-                self._client, model=model, query=query, images=images, facts=facts
-            )
+            result = await narrate(self._client, model=model, query=query, images=images, facts=facts)
         except (NarrationRejected, OpenRouterError) as exc:
-            reason = (
-                str(exc) if isinstance(exc, NarrationRejected)
-                else "the language model could not be reached"
-            )
+            reason = str(exc) if isinstance(exc, NarrationRejected) else "the language model could not be reached"
             warnings.append(
                 f"The plain-language summary was discarded because {reason}; "
                 "the fine-tuned model's own wording is shown instead."
@@ -434,12 +396,11 @@ class AgenticController:
             return None, {}
 
         payload["answer"] = result.summary
-        by_number = {region["number"]: region for region in facts["regions"]}
+        by_number = {r["number"]: r for r in facts["regions"]}
         for number, text in result.regions.items():
             region = by_number[number]
-            payload["evidence"][region["evidence_index"]]["description"] = (
-                f"{text} {region['measure']}"
-            )
+            payload["evidence"][region["evidence_index"]]["description"] = f"{text} {region['measure']}"
+
         steps.append(
             TraceStep(
                 stage="narrate",
@@ -447,7 +408,7 @@ class AgenticController:
                 model=model,
                 params={"regions": len(facts["regions"]), "temperature": 0.2},
                 detail=(
-                    f"Reworded the specialist's answer (\"{specialist_answer}\") and "
+                    f'Reworded the specialist\'s answer ("{specialist_answer}") and '
                     f"{len(result.regions)} region description(s); every region, figure "
                     "and direction was checked against the specialist's output."
                 ),
@@ -469,47 +430,31 @@ class AgenticController:
         images: list[PreparedImage],
         configuration: InputConfiguration,
     ) -> tuple[Task, str]:
-        """Rule-based deterministic routing, no model involved.
-
-        The input configuration decides the task; for a single image, a query
-        that asks to locate something goes to grounding instead.
-        """
-        if configuration == "single":
-            match = _GROUNDING_WORDS.search(query)
-            if match:
-                return "grounding", (
-                    f"Rule-based: one image, and the query asks to locate something "
-                    f"(\"{match.group(0).lower()}\"), so 'grounding'."
-                )
+        if configuration == "single" and (match := _GROUNDING_WORDS.search(query)):
+            return "grounding", (
+                f'Rule-based: one image, and the query asks to locate something '
+                f'("{match.group(0).lower()}"), so \'grounding\'.'
+            )
         task = _fallback_task(configuration)
         return task, f"Rule-based: a {configuration.replace('_', ' ')} input maps to '{task}'."
 
     def _select(self, entry: ToolEntry) -> tuple[str, str, str, bool]:
-        """Choose between the fine-tuned specialist and the baseline."""
         if entry.specialist_available:
             return entry.name, "local_specialist", entry.specialist_model, True
         return self._baseline(entry)
 
     @staticmethod
     def _check_resolution(entry: ToolEntry, images: list[PreparedImage]) -> tuple[bool, str | None]:
-        """Whether the specialist was trained on imagery at this resolution.
-
-        Returns (use the specialist, note for the trace). A model shown imagery
-        far outside its training resolution answers confidently and wrongly, so
-        such inputs go to the baseline. Uploads without georeferencing have no
-        known resolution; they still reach the specialist, with a caveat.
-        """
         if entry.gsd_range is None:
             return True, None
         try:
             low, high = entry.gsd_range()
         except Exception:
-            # Loading failed; the execute step reports it and falls back.
             logger.exception("Could not read the training resolution of '%s'", entry.name)
             return True, None
-        trained = f"{low:g} m" if low == high else f"{low:g}-{high:g} m"
 
-        known = [image.analysis_gsd_m for image in images if image.analysis_gsd_m is not None]
+        trained = f"{low:g} m" if low == high else f"{low:g}-{high:g} m"
+        known = [img.analysis_gsd_m for img in images if img.analysis_gsd_m is not None]
         if not known:
             return True, (
                 f"The input resolution is unknown (no georeferencing); the fine-tuned "
@@ -536,7 +481,6 @@ class AgenticController:
         params: dict[str, Any],
         specialist_context: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Hardcoded deterministic bypass for the baseline fallback."""
         if specialist_context:
             return {"answer": specialist_context, "evidence": []}, {}
         return {"answer": f"Task {task} executed via deterministic fallback.", "evidence": []}, {}
