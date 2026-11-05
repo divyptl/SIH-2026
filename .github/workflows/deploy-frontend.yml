@@ -1,0 +1,45 @@
+# Builds the web app and uploads it to Cloudflare Pages.
+#
+# Repository settings → Secrets and variables → Actions:
+#   secret   CLOUDFLARE_API_TOKEN   token with the "Cloudflare Pages: Edit" permission
+#   secret   CLOUDFLARE_ACCOUNT_ID
+#   variable CF_PAGES_PROJECT       e.g. satquery
+#   variable VITE_API_BASE_URL      the Space URL, e.g. https://my-user-satquery-api.hf.space
+name: Deploy frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - frontend/**
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-frontend
+  cancel-in-progress: true
+
+jobs:
+  pages:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy frontend/dist --project-name=${{ vars.CF_PAGES_PROJECT }} --branch=main

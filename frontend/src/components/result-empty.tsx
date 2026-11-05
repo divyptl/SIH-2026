@@ -1,5 +1,7 @@
 import { useTranslation } from 'react-i18next'
 
+import { Separator } from '#/components/ui/separator'
+
 type Kind = 'single' | 'pair' | 'fusion'
 
 /** A small drawing of what each kind of upload looks like. */
@@ -43,12 +45,20 @@ export function ResultEmpty() {
       <h2 className="font-heading text-xl font-semibold tracking-tight">
         {t('guide.title')}
       </h2>
-      <ul className="grid gap-8 sm:grid-cols-3 sm:gap-0 sm:divide-x">
-        {kinds.map((kind) => (
+      <ul className="grid gap-8 sm:grid-cols-3 sm:gap-0">
+        {kinds.map((kind, index) => (
           <li
             key={kind}
-            className="flex flex-col gap-3 sm:px-6 sm:first:ps-0 sm:last:pe-0"
+            className="relative flex flex-col gap-3 sm:px-6 sm:first:ps-0 sm:last:pe-0"
           >
+            {/* Column rule; inside the item, since a list holds only items. */}
+            {index > 0 && (
+              <Separator
+                orientation="vertical"
+                aria-hidden
+                className="absolute inset-y-0 start-0 hidden sm:block"
+              />
+            )}
             <Diagram kind={kind} />
             <h3 className="font-heading text-base font-semibold">
               {t(`guide.${kind}.title`)}

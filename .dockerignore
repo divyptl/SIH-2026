@@ -1,0 +1,21 @@
+# Only what deploy/Dockerfile copies. Everything else stays out of the
+# build context: checkpoints/ and data/ are tens of GB, and backend/.env holds keys.
+*
+
+!pyproject.toml
+!uv.lock
+!backend/pyproject.toml
+!backend/README.md
+!backend/**/*.py
+!backend/assets/**
+!ml/pyproject.toml
+!ml/README.md
+!ml/**/*.py
+!deploy/start.sh
+!deploy/fetch_weights.py
+
+**/__pycache__
+**/.env
+# Local virtualenvs inside the allowed folders.
+**/.venv
+ml/activate
