@@ -1,43 +1,93 @@
+from __future__ import annotations
+
 import argparse
+import sys
 import time
 from pathlib import Path
+
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from ml.datasets.sen12 import SEN12Dataset
-from ml.datasets.qxs import QXSDataset
-from ml.fusion.model import DualEncoder
-from ml.fusion.config import TrainConfig
-from ml.fusion.transforms import PairedTransform
-from ml.fusion.train import collate_with_terrain
-from ml.fusion.inference import FusionModel
+# Ensure both repo root and ml/ are on sys.path
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ML_ROOT = Path(__file__).resolve().parents[1]
+for p in (str(_REPO_ROOT), str(_ML_ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-def evaluate_retrieval(checkpoint_path: str, device: str = "cuda"):
-    print(f"Loading checkpoint from: {checkpoint_path}")
-    model = FusionModel.from_checkpoint(checkpoint_path, device=device)
+from datasets.sen12 import SEN12Dataset
+from datasets.qxs import QXSDataset
+from fusion.config import TrainConfig
+from fusion.inference import FusionModel
+from fusion.train import collate_with_terrain
+from fusion.transforms import PairedTransform, normalize_optical, normalize_sar
+
+
+def compute_retrieval_metrics(sim_matrix: np.ndarray) -> dict[str, float]:
+    N = sim_matrix.shape[0]
+    ranks = np.zeros(N, dtype=np.int64)
+    batch_size = 500
+
+    for i in range(0, N, batch_size):
+        end = min(i + batch_size, N)
+        batch_sim = sim_matrix[i:end]
+        sorted_indices = np.argsort(batch_sim, axis=1)[:, ::-1]
+        for j in range(end - i):
+            correct_idx = i + j
+            ranks[i + j] = np.where(sorted_indices[j] == correct_idx)[0][0]
+
+    return {
+        "R@1": float(100.0 * np.mean(ranks < 1)),
+        "R@5": float(100.0 * np.mean(ranks < 5)),
+        "R@10": float(100.0 * np.mean(ranks < 10)),
+        "MedR": float(np.median(ranks) + 1),
+        "MeanR": float(np.mean(ranks) + 1),
+    }
+
+
+@torch.no_grad()
+def evaluate_retrieval(
+    checkpoint_path: str,
+    device: str = "cuda",
+    apply_lee: bool = False,
+) -> dict[str, float]:
+    print(f"\n{'=' * 65}")
+    print(f"Evaluating Checkpoint : {checkpoint_path}")
+    print(f"SAR Physics Lee Filter: {'ENABLED (Refined Lee 7x7)' if apply_lee else 'DISABLED (Baseline)'}")
+    print(f"{'=' * 65}")
+
+    fm = FusionModel.from_checkpoint(checkpoint_path, device=device)
     train_cfg = TrainConfig()
 
-    print("\nLoading datasets...")
-    pair_transform_val = PairedTransform(size=train_cfg.image_size, augment=False)
-    
+    pair_transform_val = PairedTransform(
+        size=train_cfg.image_size,
+        augment=False,
+        apply_lee=apply_lee,
+    )
+
     val_datasets = []
     if train_cfg.dataset in ("sen12", "both"):
-        val_datasets.append(SEN12Dataset(
-            root=train_cfg.data_root,
-            terrains=train_cfg.terrains,
-            split="val",
-            pair_transform=pair_transform_val,
-            return_metadata=True,
-        ))
+        val_datasets.append(
+            SEN12Dataset(
+                root=train_cfg.data_root,
+                terrains=train_cfg.terrains,
+                split="val",
+                pair_transform=pair_transform_val,
+                return_metadata=True,
+            )
+        )
     if train_cfg.dataset in ("qxs", "both"):
-        val_datasets.append(QXSDataset(
-            root=train_cfg.qxs_root,
-            split="val",
-            pair_transform=pair_transform_val,
-            return_metadata=True,
-        ))
-        
+        val_datasets.append(
+            QXSDataset(
+                root=train_cfg.qxs_root,
+                split="val",
+                pair_transform=pair_transform_val,
+                return_metadata=True,
+            )
+        )
+
     val_loaders = [
         DataLoader(
             ds,
@@ -46,87 +96,93 @@ def evaluate_retrieval(checkpoint_path: str, device: str = "cuda"):
             num_workers=train_cfg.num_workers,
             pin_memory=train_cfg.pin_memory,
             collate_fn=collate_with_terrain,
-        ) for ds in val_datasets
+        )
+        for ds in val_datasets
     ]
 
     total_val_pairs = sum(len(ds) for ds in val_datasets)
     print(f"Total Validation Pairs: {total_val_pairs}")
-    
-    sar_embeddings = []
-    opt_embeddings = []
-    
-    print("\nExtracting embeddings...")
+
+    sar_embeddings, opt_embeddings = [], []
+    terrain_preds, terrain_targets = [], []
+
     t0 = time.time()
-    
-    # We will extract embeddings for each domain and concatenate them
     for domain_idx, loader in enumerate(val_loaders):
         print(f"  Processing Domain {domain_idx + 1}/{len(val_loaders)}...")
-        for sar, optical, _ in loader:
-            sar_emb = model.embed_sar(sar)
-            opt_emb = model.embed_optical(optical)
-            
-            sar_embeddings.append(sar_emb)
-            opt_embeddings.append(opt_emb)
+        for sar, optical, terrain_idx in loader:
+            sar = sar.to(fm.device, non_blocking=True)
+            optical = optical.to(fm.device, non_blocking=True)
+
+            # Ensure normalization if dataset returns [0, 1] tensors
+            if sar.min() >= 0.0 and sar.max() <= 1.0:
+                sar = normalize_sar(sar)
+            if optical.min() >= 0.0 and optical.max() <= 1.0:
+                optical = normalize_optical(optical)
+
+            sar_emb, opt_emb = fm.model(sar, optical)
+            sar_embeddings.append(sar_emb.cpu().numpy())
+            opt_embeddings.append(opt_emb.cpu().numpy())
+
+            if fm.terrain_head is not None and terrain_idx is not None:
+                sar_feat, opt_feat = fm.model.get_backbone_features()
+                logits = fm.terrain_head(sar_feat, opt_feat)
+                preds = logits.argmax(dim=-1).cpu().numpy()
+                terrain_preds.append(preds)
+                terrain_targets.append(terrain_idx.numpy())
 
     sar_embeddings = np.concatenate(sar_embeddings, axis=0)
     opt_embeddings = np.concatenate(opt_embeddings, axis=0)
-    
-    print(f"Extracted {sar_embeddings.shape[0]} embeddings in {time.time() - t0:.1f}s")
-    
-    # Normalize for cosine similarity
-    print("Normalizing embeddings...")
-    sar_embeddings = sar_embeddings / (np.linalg.norm(sar_embeddings, axis=1, keepdims=True) + 1e-8)
-    opt_embeddings = opt_embeddings / (np.linalg.norm(opt_embeddings, axis=1, keepdims=True) + 1e-8)
-    
-    print("Computing SAR -> Optical similarity matrix...")
-    # S2O similarity matrix
-    # sar_embeddings: (N, D), opt_embeddings: (N, D)
-    # sim_matrix: (N, N) where sim_matrix[i, j] is sim(sar_i, opt_j)
-    
-    def compute_recall(sim_matrix):
-        N = sim_matrix.shape[0]
-        # Sort each row in descending order
-        # We want to find the rank of the correct match (the diagonal element)
-        ranks = np.zeros(N)
-        
-        # Process in batches to save memory
-        batch_size = 500
-        for i in range(0, N, batch_size):
-            end = min(i + batch_size, N)
-            batch_sim = sim_matrix[i:end]
-            # argsort sorts ascending, so we take [:, ::-1] to get descending
-            sorted_indices = np.argsort(batch_sim, axis=1)[:, ::-1]
-            
-            for j in range(end - i):
-                correct_idx = i + j
-                rank = np.where(sorted_indices[j] == correct_idx)[0][0]
-                ranks[i+j] = rank
-                
-        r1 = 100.0 * np.mean(ranks < 1)
-        r5 = 100.0 * np.mean(ranks < 5)
-        r10 = 100.0 * np.mean(ranks < 10)
-        return r1, r5, r10
+    elapsed = time.time() - t0
+    print(f"Extracted {sar_embeddings.shape[0]} pairs in {elapsed:.1f}s")
 
-    # For 3600 items, doing a full matrix multiplication is fast (3600 x 3600 = ~13M floats)
+    sar_embeddings /= np.linalg.norm(sar_embeddings, axis=1, keepdims=True) + 1e-8
+    opt_embeddings /= np.linalg.norm(opt_embeddings, axis=1, keepdims=True) + 1e-8
+
     sim_matrix = sar_embeddings @ opt_embeddings.T
-    
-    print("Calculating Recall for SAR -> Optical (Retrieving Optical given SAR query)...")
-    s2o_r1, s2o_r5, s2o_r10 = compute_recall(sim_matrix)
-    print(f"  R@1:  {s2o_r1:.2f}%")
-    print(f"  R@5:  {s2o_r5:.2f}%")
-    print(f"  R@10: {s2o_r10:.2f}%")
-    
-    print("\nCalculating Recall for Optical -> SAR (Retrieving SAR given Optical query)...")
-    # For O2S, we just transpose the similarity matrix
-    o2s_r1, o2s_r5, o2s_r10 = compute_recall(sim_matrix.T)
-    print(f"  R@1:  {o2s_r1:.2f}%")
-    print(f"  R@5:  {o2s_r5:.2f}%")
-    print(f"  R@10: {o2s_r10:.2f}%")
+    s2o = compute_retrieval_metrics(sim_matrix)
+    o2s = compute_retrieval_metrics(sim_matrix.T)
+
+    print("\n[SAR -> Optical Retrieval]")
+    print(f"  R@1: {s2o['R@1']:6.2f}% | R@5: {s2o['R@5']:6.2f}% | R@10: {s2o['R@10']:6.2f}% | MedR: {s2o['MedR']:.1f}")
+
+    print("[Optical -> SAR Retrieval]")
+    print(f"  R@1: {o2s['R@1']:6.2f}% | R@5: {o2s['R@5']:6.2f}% | R@10: {o2s['R@10']:6.2f}% | MedR: {o2s['MedR']:.1f}")
+
+    terrain_acc = 0.0
+    if terrain_preds:
+        all_preds = np.concatenate(terrain_preds)
+        all_targets = np.concatenate(terrain_targets)
+        valid = all_targets >= 0
+        if np.any(valid):
+            terrain_acc = float(100.0 * np.mean(all_preds[valid] == all_targets[valid]))
+            print(f"\n[Cross-Modal Terrain Classification Accuracy]: {terrain_acc:.2f}%")
+
+    return {
+        "s2o_R1": s2o["R@1"],
+        "s2o_R5": s2o["R@5"],
+        "s2o_R10": s2o["R@10"],
+        "o2s_R1": o2s["R@1"],
+        "o2s_R5": o2s["R@5"],
+        "o2s_R10": o2s["R@10"],
+        "terrain_acc": terrain_acc,
+    }
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="checkpoints/fusion/v2/best.pt")
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--ablate-lee", action="store_true", help="Run both Baseline and Lee-filtered evaluation")
     args = parser.parse_args()
-    
-    evaluate_retrieval(args.checkpoint, args.device)
+
+    base_metrics = evaluate_retrieval(args.checkpoint, args.device, apply_lee=False)
+    if args.ablate_lee:
+        lee_metrics = evaluate_retrieval(args.checkpoint, args.device, apply_lee=True)
+        print(f"\n{'=' * 65}")
+        print("PAPER TABLE 1: ZERO-RETRAINING SAR LEE PHYSICS ABLATION")
+        print(f"{'=' * 65}")
+        print(f"Metric        | Raw SAR (Baseline) | Refined Lee Physics | Delta")
+        print(f"--------------+--------------------+---------------------+-------")
+        for k in ("s2o_R1", "s2o_R5", "s2o_R10", "o2s_R1", "o2s_R5", "o2s_R10", "terrain_acc"):
+            b, l = base_metrics[k], lee_metrics[k]
+            print(f"{k:13s} | {b:17.2f}% | {l:18.2f}% | {l - b:+6.2f}%")

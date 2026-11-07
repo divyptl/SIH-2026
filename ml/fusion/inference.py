@@ -1,26 +1,5 @@
 """
-Inference utilities for the trained Optical-SAR Dual Encoder.
-
-Provides high-level functions to:
-    - Load a trained model from checkpoint
-    - Embed SAR and optical images
-    - Compute cross-modal similarity scores
-    - Classify terrain from SAR-optical pairs
-    - Retrieve the most similar optical image for a given SAR image (and vice versa)
-
-Usage:
-    from ml.fusion.inference import FusionModel
-
-    model = FusionModel.from_checkpoint("checkpoints/fusion/best.pt")
-
-    # Embed and compare
-    similarity = model.compare("path/to/sar.png", "path/to/optical.png")
-
-    # Classify terrain
-    terrain, confidence = model.classify_terrain("sar.png", "optical.png")
-
-    # Batch embed for retrieval
-    embeddings = model.embed_folder("path/to/sar_images/", modality="sar")
+Inference utilities for the trained Optical-SAR Dual Encoder with Physics Pre-processing.
 """
 
 from __future__ import annotations
@@ -30,34 +9,22 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
+from PIL import Image
 
-try:
-    from PIL import Image
-except ImportError:
-    Image = None
-
-from ml.fusion.model import ContrastiveLoss, DualEncoder, TerrainClassifier
-from ml.fusion.transforms import (
+from fusion.model import ContrastiveLoss, DualEncoder, TerrainClassifier
+from fusion.sar_physics import process_sar_physics, refined_lee_filter
+from fusion.transforms import (
     compute_ndwi,
     compute_sar_water_mask,
     normalize_optical,
     normalize_sar,
 )
 
-# Default image size (should match training config)
 DEFAULT_IMAGE_SIZE = 224
 
 
 class FusionModel:
-    """High-level inference wrapper for the trained dual encoder.
-
-    Args:
-        model: The DualEncoder model.
-        terrain_head: Optional terrain classifier.
-        device: Device to run inference on.
-        image_size: Expected input image size.
-    """
-
     TERRAIN_CLASSES = ["agri", "barrenland", "grassland", "urban", "water"]
 
     def __init__(
@@ -68,23 +35,12 @@ class FusionModel:
         image_size: int = DEFAULT_IMAGE_SIZE,
     ) -> None:
         self.model = model.to(device).eval()
-        self.terrain_head = terrain_head
-        if self.terrain_head is not None:
-            self.terrain_head = self.terrain_head.to(device).eval()
+        self.terrain_head = terrain_head.to(device).eval() if terrain_head is not None else None
         self.device = device
         self.image_size = image_size
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, device: str = "auto") -> "FusionModel":
-        """Load a trained model from a checkpoint file.
-
-        Args:
-            checkpoint_path: Path to the .pt checkpoint file.
-            device: Device to load onto ('auto', 'cuda', 'cpu').
-
-        Returns:
-            FusionModel ready for inference.
-        """
         if device == "auto":
             if torch.cuda.is_available():
                 device = "cuda"
@@ -105,185 +61,102 @@ class FusionModel:
             attn_dim=cfg.get("attn_dim", 512),
             attn_heads=cfg.get("attn_heads", 8),
             attn_layers=cfg.get("attn_layers", 2),
+            sar_in_channels=cfg.get("sar_in_channels", 1),
         )
         model.load_state_dict(ckpt["model"])
 
         terrain_head = None
         if "terrain_head" in ckpt:
             backbone_name = cfg.get("backbone", "resnet50")
-            if backbone_name == "convnext_tiny":
-                feat_dim = 768
-            elif backbone_name in ("resnet18", "resnet34"):
-                feat_dim = 512
-            else:
-                feat_dim = 2048
-            # Sized from the checkpoint: heads trained before "water" was added
-            # have 4 classes, and the class list only ever grows at the end.
+            feat_dim = 768 if backbone_name == "convnext_tiny" else (512 if backbone_name in ("resnet18", "resnet34") else 2048)
             num_classes = ckpt["terrain_head"]["classifier.3.weight"].shape[0]
-            terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=num_classes)
+            use_gate = any(k.startswith("sar_gate") for k in ckpt["terrain_head"])
+            terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=num_classes, use_cross_gate=use_gate)
             terrain_head.load_state_dict(ckpt["terrain_head"])
-
-        print(f"Loaded fusion model from {checkpoint_path}")
-        print(f"  Backbone: {cfg.get('backbone', 'resnet50')}, Embed dim: {cfg.get('embed_dim', 256)}")
-        print(f"  Attention: {cfg.get('use_attention', True)} (dim={cfg.get('attn_dim', 512)}, heads={cfg.get('attn_heads', 8)}, layers={cfg.get('attn_layers', 2)})")
-        if "epoch" in ckpt:
-            print(f"  Trained for {ckpt['epoch']} epochs")
 
         instance = cls(model=model, terrain_head=terrain_head, device=device)
         if terrain_head is not None:
             instance.TERRAIN_CLASSES = cls.TERRAIN_CLASSES[:num_classes]
         return instance
 
-    # ── Image loading ────────────────────────────────────────────────────
+    def _to_raw_tensor(self, image: str | Path | Image.Image | torch.Tensor, modality: str) -> torch.Tensor:
+        """Convert path, PIL.Image, or Tensor to an unnormalized [0, 1] resized tensor (C, H, W)."""
+        if isinstance(image, torch.Tensor):
+            t = image.detach().cpu()
+            if t.dim() == 4:
+                t = t.squeeze(0)
+            return TF.resize(t, [self.image_size, self.image_size], antialias=True)
 
-    def _load_and_preprocess(
-        self,
-        image: str | Path | "Image.Image",
-        modality: str,
-    ) -> torch.Tensor:
-        """Load an image and preprocess it for the model.
-
-        Args:
-            image: Path to the image file, or an already-open PIL image.
-            modality: 'sar' or 'optical'.
-
-        Returns:
-            Preprocessed tensor (1, C, H, W) on the model's device.
-        """
-        import torchvision.transforms.functional as TF
-
-        if Image is None:
-            raise ImportError("Pillow is required for image loading: pip install Pillow")
-
-        grayscale = modality == "sar"
-        mode = "L" if grayscale else "RGB"
-        if isinstance(image, Image.Image):
-            img = image.convert(mode)
-        else:
-            img = Image.open(image).convert(mode)
-
-        # To tensor (0-1 range)
-        arr = np.array(img, dtype=np.float32) / 255.0
-        if arr.ndim == 2:
-            tensor = torch.from_numpy(arr).unsqueeze(0)  # (1, H, W)
-        else:
-            tensor = torch.from_numpy(arr.transpose(2, 0, 1))  # (3, H, W)
-
-        # Resize
-        tensor = TF.resize(tensor, [self.image_size, self.image_size], antialias=True)
-
-        # Normalize
+        pil_img = image if isinstance(image, Image.Image) else Image.open(image)
         if modality == "sar":
-            tensor = normalize_sar(tensor)
+            if getattr(self.model, "sar_in_channels", 1) == 3:
+                arr_raw = np.array(pil_img)
+                vv = arr_raw[:, :, 0] if arr_raw.ndim == 3 else arr_raw
+                vh = arr_raw[:, :, 1] if (arr_raw.ndim == 3 and arr_raw.shape[2] >= 2) else None
+                phys = process_sar_physics(vv, vh)
+                arr = phys.pseudo_rgb_uint8.astype(np.float32) / 255.0
+                tensor = torch.from_numpy(arr.transpose(2, 0, 1))
+            else:
+                gray = np.array(pil_img.convert("L"), dtype=np.float32) / 255.0
+                # Apply Refined Lee filter to suppress speckle while preserving edges
+                gray_filtered = refined_lee_filter(gray, window_size=5, enl=4.4)
+                tensor = torch.from_numpy(np.clip(gray_filtered, 0.0, 1.0)).unsqueeze(0)
         else:
-            tensor = normalize_optical(tensor)
+            arr = np.array(pil_img.convert("RGB"), dtype=np.float32) / 255.0
+            tensor = torch.from_numpy(arr.transpose(2, 0, 1))
 
-        return tensor.unsqueeze(0).to(self.device)  # (1, C, H, W)
+        return TF.resize(tensor, [self.image_size, self.image_size], antialias=True)
+
+    def _load_and_preprocess(self, image: str | Path | Image.Image, modality: str) -> torch.Tensor:
+        raw_tensor = self._to_raw_tensor(image, modality)
+        norm_tensor = normalize_sar(raw_tensor) if modality == "sar" else normalize_optical(raw_tensor)
+        return norm_tensor.unsqueeze(0).to(self.device)
 
     def _prepare_tensor(self, image, modality: str) -> torch.Tensor:
-        """Accept a file path, a PIL image, or a pre-loaded tensor."""
-        if isinstance(image, (str, Path)) or (Image is not None and isinstance(image, Image.Image)):
+        if isinstance(image, (str, Path, Image.Image)):
             return self._load_and_preprocess(image, modality)
-        elif isinstance(image, torch.Tensor):
-            # Assume already preprocessed, just add batch dim if needed
-            if image.dim() == 3:
-                image = image.unsqueeze(0)
-            return image.to(self.device)
-        else:
-            raise TypeError(f"Expected str, Path, PIL Image, or Tensor, got {type(image)}")
-
-    # ── Core operations ──────────────────────────────────────────────────
+        if isinstance(image, torch.Tensor):
+            return (image.unsqueeze(0) if image.dim() == 3 else image).to(self.device)
+        raise TypeError(f"Expected str, Path, PIL Image, or Tensor, got {type(image)}")
 
     @torch.no_grad()
     def embed_sar(self, image) -> np.ndarray:
-        """Embed a SAR image. Returns (embed_dim,) numpy array."""
-        tensor = self._prepare_tensor(image, "sar")
-        embedding = self.model.encode_sar(tensor)
-        return embedding.squeeze(0).cpu().numpy()
+        return self.model.encode_sar(self._prepare_tensor(image, "sar")).squeeze(0).cpu().numpy()
 
     @torch.no_grad()
     def embed_optical(self, image) -> np.ndarray:
-        """Embed an optical image. Returns (embed_dim,) numpy array."""
-        tensor = self._prepare_tensor(image, "optical")
-        embedding = self.model.encode_optical(tensor)
-        return embedding.squeeze(0).cpu().numpy()
+        return self.model.encode_optical(self._prepare_tensor(image, "optical")).squeeze(0).cpu().numpy()
 
     @torch.no_grad()
     def compare(self, sar_image, optical_image) -> float:
-        """Compute cosine similarity between a SAR-optical pair.
-
-        Returns:
-            Similarity score in [-1, 1]. Higher = more likely the same location.
-        """
-        sar_tensor = self._prepare_tensor(sar_image, "sar")
-        opt_tensor = self._prepare_tensor(optical_image, "optical")
-
-        sar_emb = self.model.encode_sar(sar_tensor)
-        opt_emb = self.model.encode_optical(opt_tensor)
-
-        similarity = F.cosine_similarity(sar_emb, opt_emb).item()
-        return similarity
+        sar_emb = self.model.encode_sar(self._prepare_tensor(sar_image, "sar"))
+        opt_emb = self.model.encode_optical(self._prepare_tensor(optical_image, "optical"))
+        return F.cosine_similarity(sar_emb, opt_emb).item()
 
     @torch.no_grad()
-    def classify_terrain(
-        self,
-        sar_image,
-        optical_image,
-    ) -> tuple[str, float, dict[str, float]]:
-        """Classify the terrain type from a SAR-optical pair.
-
-        Returns:
-            (predicted_class, confidence, all_probabilities)
-        """
+    def classify_terrain(self, sar_image, optical_image) -> tuple[str, float, dict[str, float]]:
         if self.terrain_head is None:
-            raise RuntimeError("No terrain classification head was loaded. "
-                               "Train with --use-terrain-head or load a checkpoint that has one.")
+            raise RuntimeError("No terrain classification head was loaded.")
 
         sar_tensor = self._prepare_tensor(sar_image, "sar")
         opt_tensor = self._prepare_tensor(optical_image, "optical")
-
         sar_feat, opt_feat = self.model.get_backbone_features(sar_tensor, opt_tensor)
-        logits = self.terrain_head(sar_feat, opt_feat)
-        probs = F.softmax(logits, dim=-1).squeeze(0)
+        probs = F.softmax(self.terrain_head(sar_feat, opt_feat), dim=-1).squeeze(0)
 
-        pred_idx = probs.argmax().item()
-        pred_class = self.TERRAIN_CLASSES[pred_idx]
-        confidence = probs[pred_idx].item()
-
-        all_probs = {cls: probs[i].item() for i, cls in enumerate(self.TERRAIN_CLASSES)}
-
-        return pred_class, confidence, all_probs
+        pred_idx = int(probs.argmax().item())
+        return (
+            self.TERRAIN_CLASSES[pred_idx],
+            float(probs[pred_idx].item()),
+            {cls: float(probs[i].item()) for i, cls in enumerate(self.TERRAIN_CLASSES)},
+        )
 
     @torch.no_grad()
-    def embed_batch(
-        self,
-        image_paths: list[str | Path],
-        modality: str,
-        batch_size: int = 32,
-    ) -> np.ndarray:
-        """Embed a batch of images. Returns (N, embed_dim) numpy array.
-
-        Args:
-            image_paths: List of image file paths.
-            modality: 'sar' or 'optical'.
-            batch_size: Processing batch size.
-        """
+    def embed_batch(self, image_paths: list[str | Path], modality: str, batch_size: int = 32) -> np.ndarray:
         all_embeddings = []
-
         for i in range(0, len(image_paths), batch_size):
-            batch_paths = image_paths[i : i + batch_size]
-            tensors = torch.cat(
-                [self._load_and_preprocess(p, modality) for p in batch_paths],
-                dim=0,
-            )
-
-            if modality == "sar":
-                embeddings = self.model.encode_sar(tensors)
-            else:
-                embeddings = self.model.encode_optical(tensors)
-
-            all_embeddings.append(embeddings.cpu())
-
+            batch = torch.cat([self._load_and_preprocess(p, modality) for p in image_paths[i : i + batch_size]], dim=0)
+            emb = self.model.encode_sar(batch) if modality == "sar" else self.model.encode_optical(batch)
+            all_embeddings.append(emb.cpu())
         return torch.cat(all_embeddings, dim=0).numpy()
 
     @torch.no_grad()
@@ -294,47 +167,14 @@ class FusionModel:
         gallery_embeddings: np.ndarray,
         top_k: int = 5,
     ) -> list[tuple[int, float]]:
-        """Retrieve the top-K most similar images from the other modality.
-
-        Args:
-            query_image: Path or tensor of the query image.
-            query_modality: 'sar' or 'optical' (modality of the query).
-            gallery_embeddings: (N, embed_dim) precomputed embeddings of the gallery
-                                (should be the OTHER modality).
-            top_k: Number of results to return.
-
-        Returns:
-            List of (gallery_index, similarity_score) tuples, sorted by similarity.
-        """
-        if query_modality == "sar":
-            query_emb = self.embed_sar(query_image)
-        else:
-            query_emb = self.embed_optical(query_image)
-
-        # Cosine similarity
+        query_emb = self.embed_sar(query_image) if query_modality == "sar" else self.embed_optical(query_image)
         query_norm = query_emb / (np.linalg.norm(query_emb) + 1e-8)
-        gallery_norm = gallery_embeddings / (
-            np.linalg.norm(gallery_embeddings, axis=1, keepdims=True) + 1e-8
-        )
-        similarities = gallery_norm @ query_norm
+        gallery_norm = gallery_embeddings / (np.linalg.norm(gallery_embeddings, axis=1, keepdims=True) + 1e-8)
+        sims = gallery_norm @ query_norm
+        top_indices = np.argsort(sims)[::-1][:top_k]
+        return [(int(idx), float(sims[idx])) for idx in top_indices]
 
-        # Top-K
-        top_indices = np.argsort(similarities)[::-1][:top_k]
-        results = [(int(idx), float(similarities[idx])) for idx in top_indices]
-
-        return results
-
-    def get_analysis(
-        self,
-        sar_image,
-        optical_image,
-    ) -> dict:
-        """Full analysis of a SAR-optical pair.
-
-        Returns a dict with similarity, embeddings, terrain classification,
-        and water detection (NDWI + SAR water mask).
-        This is the main method to call from the backend/controller.
-        """
+    def get_analysis(self, sar_image, optical_image) -> dict:
         result = {
             "similarity": self.compare(sar_image, optical_image),
             "sar_embedding": self.embed_sar(sar_image).tolist(),
@@ -349,62 +189,20 @@ class FusionModel:
                 "probabilities": all_probs,
             }
 
-        # Water detection via spectral indices
-        opt_tensor = self._prepare_tensor(optical_image, "optical")
-        sar_tensor = self._prepare_tensor(sar_image, "sar")
+        # Always compute NDWI and SAR water masks on unnormalized [0, 1] tensors
+        raw_opt = self._to_raw_tensor(optical_image, "optical")
+        raw_sar = self._to_raw_tensor(sar_image, "sar")
 
-        # NDWI from optical (un-normalised values needed, so use raw [0,1] tensor)
-        import torchvision.transforms.functional as TF
-        if isinstance(optical_image, (str, Path)):
-            raw_opt = np.array(Image.open(optical_image).convert("RGB"), dtype=np.float32) / 255.0
-            raw_opt = torch.from_numpy(raw_opt.transpose(2, 0, 1))
-            raw_opt = TF.resize(raw_opt, [self.image_size, self.image_size], antialias=True)
-        else:
-            raw_opt = opt_tensor.squeeze(0)  # already a tensor
-
-        ndwi_map = compute_ndwi(raw_opt)  # (1, H, W)
-        ndwi_mean = ndwi_map.mean().item()
-        water_pixel_ratio = (ndwi_map > 0.0).float().mean().item()
-
-        # SAR water mask
-        if isinstance(sar_image, (str, Path)):
-            raw_sar = np.array(Image.open(sar_image).convert("L"), dtype=np.float32) / 255.0
-            raw_sar = torch.from_numpy(raw_sar[np.newaxis])
-            raw_sar = TF.resize(raw_sar, [self.image_size, self.image_size], antialias=True)
-        else:
-            raw_sar = sar_tensor.squeeze(0)
+        ndwi_map = compute_ndwi(raw_opt)
+        ndwi_mean = float(ndwi_map.mean().item())
+        water_pixel_ratio = float((ndwi_map > 0.0).float().mean().item())
 
         sar_water = compute_sar_water_mask(raw_sar)
-        sar_water_ratio = sar_water.mean().item()
+        sar_water_ratio = float(sar_water.mean().item())
 
         result["water"] = {
             "ndwi_mean": round(ndwi_mean, 4),
             "ndwi_water_pixel_ratio": round(water_pixel_ratio, 4),
             "sar_water_pixel_ratio": round(sar_water_ratio, 4),
         }
-
         return result
-
-
-# ── CLI ──────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Run inference with the fusion model")
-    parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint")
-    parser.add_argument("--sar", required=True, help="Path to SAR image")
-    parser.add_argument("--optical", required=True, help="Path to optical image")
-    parser.add_argument("--device", default="auto")
-    args = parser.parse_args()
-
-    model = FusionModel.from_checkpoint(args.checkpoint, device=args.device)
-    result = model.get_analysis(args.sar, args.optical)
-
-    print(f"\nSimilarity:  {result['similarity']:.4f}")
-    if "terrain" in result:
-        t = result["terrain"]
-        print(f"Terrain:     {t['predicted']} ({t['confidence']:.1%})")
-        for cls, prob in t["probabilities"].items():
-            bar = "#" * int(prob * 30)
-            print(f"  {cls:12s} {prob:6.1%}  {bar}")
