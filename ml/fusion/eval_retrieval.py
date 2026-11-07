@@ -169,15 +169,30 @@ def evaluate_retrieval(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/fusion/v2/best.pt")
-    parser.add_argument("--device", type=str, default="cuda")
+    parser = argparse.ArgumentParser(description="Evaluate Optical-SAR Retrieval & Terrain Classification")
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/fusion/v3/best.pt")
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
+    parser.add_argument("--num-workers", type=int, default=None, help="Override dataloader workers")
+    parser.add_argument("--dataset", type=str, default=None, choices=["sen12", "qxs", "both"])
+    parser.add_argument("--data-root", type=str, default=None, help="Override SEN1-2 dataset path")
+    parser.add_argument("--qxs-root", type=str, default=None, help="Override QXS dataset path")
     parser.add_argument("--ablate-lee", action="store_true", help="Run both Baseline and Lee-filtered evaluation")
     args = parser.parse_args()
 
-    base_metrics = evaluate_retrieval(args.checkpoint, args.device, apply_lee=False)
+    common_kwargs = dict(
+        checkpoint_path=args.checkpoint,
+        device=args.device,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        data_root=args.data_root,
+        qxs_root=args.qxs_root,
+        dataset=args.dataset,
+    )
+
+    base_metrics = evaluate_retrieval(**common_kwargs, apply_lee=False)
     if args.ablate_lee:
-        lee_metrics = evaluate_retrieval(args.checkpoint, args.device, apply_lee=True)
+        lee_metrics = evaluate_retrieval(**common_kwargs, apply_lee=True)
         print(f"\n{'=' * 65}")
         print("PAPER TABLE 1: ZERO-RETRAINING SAR LEE PHYSICS ABLATION")
         print(f"{'=' * 65}")
@@ -186,3 +201,37 @@ if __name__ == "__main__":
         for k in ("s2o_R1", "s2o_R5", "s2o_R10", "o2s_R1", "o2s_R5", "o2s_R10", "terrain_acc"):
             b, l = base_metrics[k], lee_metrics[k]
             print(f"{k:13s} | {b:17.2f}% | {l:18.2f}% | {l - b:+6.2f}%")
+
+@torch.no_grad()
+def evaluate_retrieval(
+    checkpoint_path: str,
+    device: str = "cuda",
+    apply_lee: bool = False,
+    batch_size: int | None = None,
+    num_workers: int | None = None,
+    data_root: str | None = None,
+    qxs_root: str | None = None,
+    dataset: str | None = None,
+) -> dict[str, float]:
+    print(f"\n{'=' * 65}")
+    print(f"Evaluating Checkpoint : {checkpoint_path}")
+    print(f"SAR Physics Lee Filter: {'ENABLED (Refined Lee 7x7)' if apply_lee else 'DISABLED (Baseline)'}")
+    print(f"{'=' * 65}")
+
+    fm = FusionModel.from_checkpoint(checkpoint_path, device=device)
+    train_cfg = TrainConfig()
+    train_cfg.auto_scale_hardware()
+
+    # Apply explicit CLI overrides if provided
+    if batch_size is not None:
+        train_cfg.batch_size = batch_size
+    if num_workers is not None:
+        train_cfg.num_workers = num_workers
+    if data_root is not None:
+        train_cfg.data_root = data_root
+    if qxs_root is not None:
+        train_cfg.qxs_root = qxs_root
+    if dataset is not None:
+        train_cfg.dataset = dataset
+
+    print(f"Runtime Config: batch_size={train_cfg.batch_size}, num_workers={train_cfg.num_workers}, device={fm.device}")

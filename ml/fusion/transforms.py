@@ -84,8 +84,14 @@ class PairedTransform:
 
 
 def normalize_sar(x: torch.Tensor) -> torch.Tensor:
-    mean = torch.tensor(SAR_MEAN, device=x.device).view(-1, 1, 1)
-    std = torch.tensor(SAR_STD, device=x.device).view(-1, 1, 1)
+    """Normalize 1-channel or 3-channel physics SAR tensor."""
+    c = x.shape[-3] if x.dim() >= 3 else 1
+    if c == 3:
+        mean = torch.tensor([0.45, 0.35, 0.40], device=x.device).view(-1, 1, 1)
+        std = torch.tensor([0.22, 0.22, 0.22], device=x.device).view(-1, 1, 1)
+    else:
+        mean = torch.tensor(SAR_MEAN, device=x.device).view(-1, 1, 1)
+        std = torch.tensor(SAR_STD, device=x.device).view(-1, 1, 1)
     return (x - mean) / std
 
 

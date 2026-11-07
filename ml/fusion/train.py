@@ -1,19 +1,9 @@
 """
-Training script for the Optical-SAR Dual Encoder.
+Training script for the Physics-Guided Optical-SAR Dual Encoder.
 
-Trains a CLIP-style dual encoder on SEN1-2 SAR-optical image pairs using
-NT-Xent contrastive loss with optional terrain classification as an
-auxiliary multi-task objective.
-
-Usage:
-    # From project root, using the ml venv:
-    python -m ml.fusion.train
-
-    # With overrides:
-    python -m ml.fusion.train --epochs 100 --batch-size 64 --backbone resnet50
-
-    # Resume from checkpoint:
-    python -m ml.fusion.train --resume checkpoints/fusion/epoch_25.pt
+Supports multi-domain contrastive learning (NT-Xent), multi-task Cross-Gated
+Terrain Classification, Refined Lee SAR Physics preprocessing, and dynamic
+CLI / hardware scaling across laptop, workstation (RTX 5090), or cloud GPUs.
 """
 
 from __future__ import annotations
@@ -21,27 +11,26 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import platform
 import sys
 import time
 from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader
 
-# Add project root to path
+# Ensure both project root and ml/ are on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+ML_ROOT = Path(__file__).resolve().parent.parent
+for p in (str(PROJECT_ROOT), str(ML_ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from ml.datasets.sen12 import SEN12Dataset
 from ml.datasets.qxs import QXSDataset
 from ml.fusion.config import ModelConfig, TrainConfig
 from ml.fusion.model import ContrastiveLoss, DualEncoder, TerrainClassifier
 from ml.fusion.transforms import PairedTransform, normalize_optical, normalize_sar
-
-
-# ── Terrain label mapping ───────────────────────────────────────────────
 
 TERRAIN_TO_IDX = {"agri": 0, "barrenland": 1, "grassland": 2, "urban": 3, "water": 4}
 
@@ -52,13 +41,11 @@ def collate_with_terrain(batch):
     sar_batch = torch.stack(sars)
     opt_batch = torch.stack(opticals)
     terrain_labels = torch.tensor(
-        [TERRAIN_TO_IDX[m["terrain"]] for m in metas],
+        [TERRAIN_TO_IDX.get(m.get("terrain", ""), -1) for m in metas],
         dtype=torch.long,
     )
     return sar_batch, opt_batch, terrain_labels
 
-
-# ── Learning rate scheduler ─────────────────────────────────────────────
 
 def get_cosine_schedule(optimizer, warmup_epochs, total_epochs, min_lr, steps_per_epoch):
     """Cosine annealing with linear warmup."""
@@ -74,8 +61,6 @@ def get_cosine_schedule(optimizer, warmup_epochs, total_epochs, min_lr, steps_pe
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-# ── Training loop ────────────────────────────────────────────────────────
-
 def train_one_epoch(
     model: DualEncoder,
     loss_fn: ContrastiveLoss,
@@ -83,13 +68,14 @@ def train_one_epoch(
     train_loaders: list[DataLoader],
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
-    scaler: torch.cuda.amp.GradScaler | None,
+    scaler: torch.amp.GradScaler | None,
     use_amp: bool,
     device: str,
     epoch: int,
     cfg: TrainConfig,
+    detach_terrain: bool = False,
 ) -> dict[str, float]:
-    """Train for one epoch. Returns average metrics."""
+    """Train for one epoch across all configured datasets."""
     model.train()
     loss_fn.train()
     if terrain_head is not None:
@@ -103,6 +89,8 @@ def train_one_epoch(
     total_terrain_acc = 0.0
     num_batches = 0
 
+    amp_device = "cuda" if "cuda" in device else "cpu"
+
     for step, batches in enumerate(zip(*train_loaders)):
         loss = torch.tensor(0.0, device=device)
         step_contrastive = 0.0
@@ -111,46 +99,42 @@ def train_one_epoch(
         step_o2s = 0.0
         step_terrain_acc = 0.0
         last_temp = 0.0
-        
+
         num_domains = len(batches)
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         for sar, optical, terrain_labels in batches:
-            sar = normalize_sar(sar.to(device))
-            optical = normalize_optical(optical.to(device))
-            terrain_labels = terrain_labels.to(device)
+            sar = normalize_sar(sar.to(device, non_blocking=True))
+            optical = normalize_optical(optical.to(device, non_blocking=True))
+            terrain_labels = terrain_labels.to(device, non_blocking=True)
 
-            # Forward pass under autocast
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast(amp_device, enabled=use_amp):
                 sar_emb, opt_emb = model(sar, optical)
-
-                # Contrastive loss (in-domain only)
                 contrastive_loss, contrastive_metrics = loss_fn(sar_emb, opt_emb)
                 domain_loss = contrastive_loss
 
-                # Terrain classification (multi-task)
                 domain_terrain_loss = 0.0
                 domain_terrain_acc = 0.0
-                if terrain_head is not None:
+                valid_mask = terrain_labels >= 0
+                if terrain_head is not None and valid_mask.any():
                     sar_feat, opt_feat = model.get_backbone_features()
-                    terrain_logits = terrain_head(sar_feat.detach(), opt_feat.detach())
-                    terrain_loss = nn.functional.cross_entropy(terrain_logits, terrain_labels)
+                    if detach_terrain:
+                        sar_feat, opt_feat = sar_feat.detach(), opt_feat.detach()
+                    terrain_logits = terrain_head(sar_feat[valid_mask], opt_feat[valid_mask])
+                    valid_labels = terrain_labels[valid_mask]
+                    terrain_loss = nn.functional.cross_entropy(terrain_logits, valid_labels)
                     domain_loss = domain_loss + cfg.terrain_loss_weight * terrain_loss
                     domain_terrain_loss = terrain_loss.item()
-                    domain_terrain_acc = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
+                    domain_terrain_acc = (terrain_logits.argmax(1) == valid_labels).float().mean().item()
 
-                # Scale the loss to average gradients across domains
                 domain_loss = domain_loss / num_domains
-                
-            # Scaled backward pass, run per domain to free the graph and VRAM
+
             if scaler is not None:
                 scaler.scale(domain_loss).backward()
             else:
                 domain_loss.backward()
-                
-            loss = loss + domain_loss.detach()
 
-            # Accumulate metrics across domains for logging
+            loss = loss + domain_loss.detach()
             step_contrastive += contrastive_metrics["loss"]
             step_terrain += domain_terrain_loss
             step_s2o += contrastive_metrics["sar2opt_acc"]
@@ -158,7 +142,6 @@ def train_one_epoch(
             step_terrain_acc += domain_terrain_acc
             last_temp = contrastive_metrics["temperature"]
 
-        # Step optimizer
         if scaler is not None:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -174,7 +157,6 @@ def train_one_epoch(
 
         scheduler.step()
 
-        # Accumulate metrics
         total_loss += loss.item()
         total_contrastive += step_contrastive / num_domains
         total_terrain += step_terrain / num_domains
@@ -183,7 +165,6 @@ def train_one_epoch(
         total_terrain_acc += step_terrain_acc / num_domains
         num_batches += 1
 
-        # Logging
         if (step + 1) % cfg.log_every == 0:
             lr = optimizer.param_groups[0]["lr"]
             num_steps = min(len(dl) for dl in train_loaders)
@@ -198,13 +179,14 @@ def train_one_epoch(
                 f"lr={lr:.2e}"
             )
 
+    denom = max(num_batches, 1)
     return {
-        "loss": total_loss / max(num_batches, 1),
-        "contrastive_loss": total_contrastive / max(num_batches, 1),
-        "terrain_loss": total_terrain / max(num_batches, 1),
-        "sar2opt_acc": total_s2o_acc / max(num_batches, 1),
-        "opt2sar_acc": total_o2s_acc / max(num_batches, 1),
-        "terrain_acc": total_terrain_acc / max(num_batches, 1),
+        "loss": total_loss / denom,
+        "contrastive_loss": total_contrastive / denom,
+        "terrain_loss": total_terrain / denom,
+        "sar2opt_acc": total_s2o_acc / denom,
+        "opt2sar_acc": total_o2s_acc / denom,
+        "terrain_acc": total_terrain_acc / denom,
     }
 
 
@@ -228,38 +210,41 @@ def evaluate(
     total_o2s_acc = 0.0
     total_terrain_acc = 0.0
     num_batches = 0
+    terrain_batches = 0
+
+    amp_device = "cuda" if "cuda" in device else "cpu"
 
     for val_loader in val_loaders:
         for sar, optical, terrain_labels in val_loader:
-            sar = normalize_sar(sar.to(device))
-            optical = normalize_optical(optical.to(device))
-            terrain_labels = terrain_labels.to(device)
+            sar = normalize_sar(sar.to(device, non_blocking=True))
+            optical = normalize_optical(optical.to(device, non_blocking=True))
+            terrain_labels = terrain_labels.to(device, non_blocking=True)
 
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast(amp_device, enabled=use_amp):
                 sar_emb, opt_emb = model(sar, optical)
                 _, metrics = loss_fn(sar_emb, opt_emb)
 
-                terrain_acc = 0.0
-                if terrain_head is not None:
+                valid_mask = terrain_labels >= 0
+                if terrain_head is not None and valid_mask.any():
                     sar_feat, opt_feat = model.get_backbone_features()
-                    terrain_logits = terrain_head(sar_feat, opt_feat)
-                    terrain_acc = (terrain_logits.argmax(1) == terrain_labels).float().mean().item()
+                    terrain_logits = terrain_head(sar_feat[valid_mask], opt_feat[valid_mask])
+                    terrain_acc = (terrain_logits.argmax(1) == terrain_labels[valid_mask]).float().mean().item()
+                    total_terrain_acc += terrain_acc
+                    terrain_batches += 1
 
             total_loss += metrics["loss"]
             total_s2o_acc += metrics["sar2opt_acc"]
             total_o2s_acc += metrics["opt2sar_acc"]
-            total_terrain_acc += terrain_acc
             num_batches += 1
 
+    denom = max(num_batches, 1)
     return {
-        "val_loss": total_loss / max(num_batches, 1),
-        "val_sar2opt_acc": total_s2o_acc / max(num_batches, 1),
-        "val_opt2sar_acc": total_o2s_acc / max(num_batches, 1),
-        "val_terrain_acc": total_terrain_acc / max(num_batches, 1),
+        "val_loss": total_loss / denom,
+        "val_sar2opt_acc": total_s2o_acc / denom,
+        "val_opt2sar_acc": total_o2s_acc / denom,
+        "val_terrain_acc": total_terrain_acc / max(terrain_batches, 1),
     }
 
-
-# ── Checkpointing ───────────────────────────────────────────────────────
 
 def save_checkpoint(
     path: Path,
@@ -271,9 +256,9 @@ def save_checkpoint(
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     metrics: dict,
     model_cfg: ModelConfig,
-    scaler: torch.cuda.amp.GradScaler | None = None,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> None:
-    """Save a training checkpoint."""
+    """Save a training checkpoint with full architecture metadata for inference."""
     path.parent.mkdir(parents=True, exist_ok=True)
     state = {
         "epoch": epoch,
@@ -286,6 +271,12 @@ def save_checkpoint(
             "backbone": model_cfg.backbone,
             "embed_dim": model_cfg.embed_dim,
             "projection_hidden": model_cfg.projection_hidden,
+            "use_attention": model_cfg.use_attention,
+            "attn_dim": model_cfg.attn_dim,
+            "attn_heads": model_cfg.attn_heads,
+            "attn_layers": model_cfg.attn_layers,
+            "sar_in_channels": model_cfg.sar_in_channels,
+            "use_cross_gate": model_cfg.use_cross_gate,
         },
     }
     if terrain_head is not None:
@@ -304,7 +295,7 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: str,
-    scaler: torch.cuda.amp.GradScaler | None = None,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> int:
     """Load a checkpoint. Returns the epoch to resume from."""
     ckpt = torch.load(path, map_location=device, weights_only=False)
@@ -320,8 +311,6 @@ def load_checkpoint(
     return ckpt["epoch"]
 
 
-# ── Main ─────────────────────────────────────────────────────────────────
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the Optical-SAR Dual Encoder")
     parser.add_argument("--epochs", type=int, default=None)
@@ -329,24 +318,42 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--backbone", type=str, default=None)
     parser.add_argument("--embed-dim", type=int, default=None)
-    parser.add_argument("--dataset", type=str, default=None, help="sen12 | qxs | both")
+    parser.add_argument("--sar-channels", type=int, default=None, choices=[1, 3])
+    parser.add_argument("--use-attention", action="store_true", help="Enable Self-Attention block")
+    parser.add_argument("--no-cross-gate", action="store_true", help="Disable Cross-Modal Gating in TerrainHead")
+    parser.add_argument("--apply-lee", action="store_true", help="Apply Refined Lee SAR filter during loading")
+    parser.add_argument("--detach-terrain", action="store_true", help="Detach backbone features before terrain head")
+    parser.add_argument("--auto-hardware", action="store_true", help="Auto-scale batch_size & num_workers from VRAM/CPU")
+    parser.add_argument("--dataset", type=str, default=None, choices=["sen12", "qxs", "both"])
     parser.add_argument("--image-size", type=int, default=None)
     parser.add_argument("--data-root", type=str, default=None)
+    parser.add_argument("--qxs-root", type=str, default=None)
+    parser.add_argument("--checkpoint-dir", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None)
-    parser.add_argument("--num-workers", type=int, default=None, help="DataLoader workers (default: 0 on Windows, 4 otherwise)")
-    parser.add_argument("--save-every", type=int, default=None, help="Save numbered checkpoint every N epochs (default: 1)")
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--save-every", type=int, default=None)
     parser.add_argument("--no-terrain", action="store_true", help="Disable terrain classification head")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
-    # Build config with CLI overrides
     model_cfg = ModelConfig()
     train_cfg = TrainConfig()
+
+    if args.auto_hardware:
+        train_cfg.auto_scale_hardware()
 
     if args.backbone:
         model_cfg.backbone = args.backbone
     if args.embed_dim:
         model_cfg.embed_dim = args.embed_dim
+    if args.sar_channels:
+        model_cfg.sar_in_channels = args.sar_channels
+    if args.use_attention:
+        model_cfg.use_attention = True
+    if args.no_cross_gate:
+        model_cfg.use_cross_gate = False
+    if args.apply_lee:
+        train_cfg.apply_lee = True
     if args.epochs:
         train_cfg.epochs = args.epochs
     if args.dataset:
@@ -359,12 +366,14 @@ def main() -> None:
         train_cfg.image_size = args.image_size
     if args.data_root:
         train_cfg.data_root = args.data_root
+    if args.qxs_root:
+        train_cfg.qxs_root = args.qxs_root
+    if args.checkpoint_dir:
+        train_cfg.checkpoint_dir = args.checkpoint_dir
     if args.resume:
         train_cfg.resume_from = args.resume
     if args.num_workers is not None:
         train_cfg.num_workers = args.num_workers
-    elif platform.system() == "Windows":
-        train_cfg.num_workers = 0  # multiprocess DataLoader is slow/broken on Windows
     if args.save_every is not None:
         train_cfg.save_every = args.save_every
     if args.no_terrain:
@@ -375,26 +384,27 @@ def main() -> None:
     device = train_cfg.resolve_device()
 
     print("=" * 70)
-    print("  Optical-SAR Dual Encoder Training")
+    print("  Optical-SAR Physics-Guided Dual Encoder Training")
     print("=" * 70)
-    print(f"  Backbone:     {model_cfg.backbone}")
-    print(f"  Embed dim:    {model_cfg.embed_dim}")
-    print(f"  Batch size:   {train_cfg.batch_size}")
-    print(f"  Epochs:       {train_cfg.epochs}")
-    print(f"  LR:           {train_cfg.lr}")
-    print(f"  Image size:   {train_cfg.image_size}")
-    print(f"  Terrain head: {train_cfg.use_terrain_head}")
-    print(f"  Device:       {device}")
-    print(f"  Data root:    {train_cfg.data_root}")
+    print(f"  Backbone:       {model_cfg.backbone} (SAR channels={model_cfg.sar_in_channels})")
+    print(f"  Embed dim:      {model_cfg.embed_dim} (Proj hidden={model_cfg.projection_hidden})")
+    print(f"  Self-Attention: {model_cfg.use_attention}")
+    print(f"  Lee Speckle:    {train_cfg.apply_lee} (+ Gamma Multiplicative Speckle Aug)")
+    print(f"  Terrain head:   {train_cfg.use_terrain_head} (Cross-Gate={model_cfg.use_cross_gate})")
+    print(f"  Batch size:     {train_cfg.batch_size} | Workers: {train_cfg.num_workers}")
+    print(f"  Epochs:         {train_cfg.epochs} | LR: {train_cfg.lr}")
+    print(f"  Device:         {device} | Checkpoint dir: {train_cfg.checkpoint_dir}")
     print("=" * 70)
 
-    # ── Data ──
     print("\nLoading datasets...")
-    pair_transform_train = PairedTransform(size=train_cfg.image_size, augment=True)
-    pair_transform_val = PairedTransform(size=train_cfg.image_size, augment=False)
+    pair_transform_train = PairedTransform(
+        size=train_cfg.image_size, augment=True, apply_lee=train_cfg.apply_lee
+    )
+    pair_transform_val = PairedTransform(
+        size=train_cfg.image_size, augment=False, apply_lee=train_cfg.apply_lee
+    )
 
-    train_datasets = []
-    val_datasets = []
+    train_datasets, val_datasets = [], []
 
     if train_cfg.dataset in ("sen12", "both"):
         train_datasets.append(SEN12Dataset(
@@ -426,35 +436,20 @@ def main() -> None:
             return_metadata=True,
         ))
 
-    train_loaders = [
-        DataLoader(
-            ds,
-            batch_size=train_cfg.batch_size,
-            shuffle=True,
-            num_workers=train_cfg.num_workers,
-            pin_memory=train_cfg.pin_memory,
-            collate_fn=collate_with_terrain,
-            drop_last=True,
-        ) for ds in train_datasets
-    ]
-    
-    val_loaders = [
-        DataLoader(
-            ds,
-            batch_size=train_cfg.batch_size,
-            shuffle=False,
-            num_workers=train_cfg.num_workers,
-            pin_memory=train_cfg.pin_memory,
-            collate_fn=collate_with_terrain,
-        ) for ds in val_datasets
-    ]
+    loader_kwargs = dict(
+        batch_size=train_cfg.batch_size,
+        num_workers=train_cfg.num_workers,
+        pin_memory=train_cfg.pin_memory,
+        collate_fn=collate_with_terrain,
+        persistent_workers=train_cfg.num_workers > 0,
+    )
 
-    total_train_pairs = sum(len(ds) for ds in train_datasets)
-    total_val_pairs = sum(len(ds) for ds in val_datasets)
-    print(f"  Train: {total_train_pairs:,} pairs across {len(train_datasets)} dataset(s)")
-    print(f"  Val:   {total_val_pairs:,} pairs across {len(val_datasets)} dataset(s)")
+    train_loaders = [DataLoader(ds, shuffle=True, drop_last=True, **loader_kwargs) for ds in train_datasets]
+    val_loaders = [DataLoader(ds, shuffle=False, **loader_kwargs) for ds in val_datasets]
 
-    # ── Model ──
+    print(f"  Train: {sum(len(ds) for ds in train_datasets):,} pairs across {len(train_datasets)} dataset(s)")
+    print(f"  Val:   {sum(len(ds) for ds in val_datasets):,} pairs across {len(val_datasets)} dataset(s)")
+
     print("\nBuilding model...")
     model = DualEncoder(
         backbone=model_cfg.backbone,
@@ -465,6 +460,7 @@ def main() -> None:
         attn_dim=model_cfg.attn_dim,
         attn_heads=model_cfg.attn_heads,
         attn_layers=model_cfg.attn_layers,
+        sar_in_channels=model_cfg.sar_in_channels,
     ).to(device)
 
     loss_fn = ContrastiveLoss(
@@ -474,17 +470,16 @@ def main() -> None:
 
     terrain_head = None
     if train_cfg.use_terrain_head:
-        # Get backbone feature dim
-        if model_cfg.backbone == "convnext_tiny":
-            feat_dim = 768
-        else:
-            feat_dim = 512 if model_cfg.backbone in ("resnet18", "resnet34") else 2048
-        terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=5).to(device)
+        feat_dim = 768 if model_cfg.backbone == "convnext_tiny" else (512 if model_cfg.backbone in ("resnet18", "resnet34") else 2048)
+        terrain_head = TerrainClassifier(
+            feature_dim=feat_dim,
+            num_classes=len(TERRAIN_TO_IDX),
+            use_cross_gate=model_cfg.use_cross_gate,
+        ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"  Model params: {total_params:.1f}M")
 
-    # ── Optimizer ──
     param_groups = [
         {"params": model.parameters()},
         {"params": loss_fn.parameters()},
@@ -492,40 +487,22 @@ def main() -> None:
     if terrain_head is not None:
         param_groups.append({"params": terrain_head.parameters()})
 
-    optimizer = torch.optim.AdamW(
-        param_groups,
-        lr=train_cfg.lr,
-        weight_decay=train_cfg.weight_decay,
-    )
+    optimizer = torch.optim.AdamW(param_groups, lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
 
     steps_per_epoch = min(len(dl) for dl in train_loaders)
     scheduler = get_cosine_schedule(
-        optimizer,
-        train_cfg.warmup_epochs,
-        train_cfg.epochs,
-        train_cfg.min_lr,
-        steps_per_epoch,
+        optimizer, train_cfg.warmup_epochs, train_cfg.epochs, train_cfg.min_lr, steps_per_epoch
     )
 
-    # ── AMP setup ──
-    # Create the grad scaler before the training loop (and before resuming, so
-    # a checkpoint can restore its loss scale)
-    use_amp = train_cfg.use_amp and device == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
+    use_amp = train_cfg.use_amp and "cuda" in device
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
 
-    # ── Resume ──
     start_epoch = 1
     if train_cfg.resume_from:
         start_epoch = load_checkpoint(
-            train_cfg.resume_from, model, loss_fn, terrain_head,
-            optimizer, scheduler, device, scaler,
+            train_cfg.resume_from, model, loss_fn, terrain_head, optimizer, scheduler, device, scaler
         ) + 1
 
-    # ── AMP setup ──
-    use_amp = train_cfg.use_amp and device == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
-
-    # ── Training loop ──
     print(f"\nStarting training from epoch {start_epoch}...\n")
     best_val_loss = float("inf")
     history: list[dict] = []
@@ -533,13 +510,12 @@ def main() -> None:
     for epoch in range(start_epoch, train_cfg.epochs + 1):
         t0 = time.time()
 
-        # Train
         train_metrics = train_one_epoch(
             model, loss_fn, terrain_head, train_loaders,
             optimizer, scheduler, scaler, use_amp, device, epoch, train_cfg,
+            detach_terrain=args.detach_terrain,
         )
 
-        # Evaluate
         val_metrics = {}
         if epoch % train_cfg.eval_every == 0:
             val_metrics = evaluate(model, loss_fn, terrain_head, val_loaders, device, use_amp)
@@ -548,51 +524,41 @@ def main() -> None:
         all_metrics = {**train_metrics, **val_metrics, "epoch": epoch, "time": elapsed}
         history.append(all_metrics)
 
-        # Epoch summary
-        val_str = ""
-        if val_metrics:
-            val_str = (
-                f"  val_loss={val_metrics['val_loss']:.4f}  "
-                f"val_s2o={val_metrics['val_sar2opt_acc']:.1%}  "
-                f"val_o2s={val_metrics['val_opt2sar_acc']:.1%}  "
-                f"val_terrain={val_metrics['val_terrain_acc']:.1%}"
-            )
+        val_str = (
+            f"  val_loss={val_metrics['val_loss']:.4f}  "
+            f"val_s2o={val_metrics['val_sar2opt_acc']:.1%}  "
+            f"val_o2s={val_metrics['val_opt2sar_acc']:.1%}  "
+            f"val_terrain={val_metrics['val_terrain_acc']:.1%}"
+            if val_metrics else ""
+        )
         print(
             f"Epoch {epoch}/{train_cfg.epochs}  "
             f"loss={train_metrics['loss']:.4f}  "
             f"s2o={train_metrics['sar2opt_acc']:.1%}  "
             f"o2s={train_metrics['opt2sar_acc']:.1%}  "
             f"terrain={train_metrics['terrain_acc']:.1%}"
-            f"{val_str}  "
-            f"[{elapsed:.1f}s]"
+            f"{val_str}  [{elapsed:.1f}s]"
         )
 
-        # Always save latest.pt so we can resume from the last completed epoch
         save_checkpoint(
             train_cfg.checkpoint_path / "latest.pt",
-            epoch, model, loss_fn, terrain_head,
-            optimizer, scheduler, all_metrics, model_cfg, scaler,
+            epoch, model, loss_fn, terrain_head, optimizer, scheduler, all_metrics, model_cfg, scaler,
         )
 
-        # Save numbered checkpoint at configured interval
         if epoch % train_cfg.save_every == 0:
             save_checkpoint(
                 train_cfg.checkpoint_path / f"epoch_{epoch}.pt",
-                epoch, model, loss_fn, terrain_head,
-                optimizer, scheduler, all_metrics, model_cfg, scaler,
+                epoch, model, loss_fn, terrain_head, optimizer, scheduler, all_metrics, model_cfg, scaler,
             )
 
-        # Save best model
         if val_metrics and val_metrics["val_loss"] < best_val_loss:
             best_val_loss = val_metrics["val_loss"]
             save_checkpoint(
                 train_cfg.checkpoint_path / "best.pt",
-                epoch, model, loss_fn, terrain_head,
-                optimizer, scheduler, all_metrics, model_cfg, scaler,
+                epoch, model, loss_fn, terrain_head, optimizer, scheduler, all_metrics, model_cfg, scaler,
             )
             print(f"  >> New best model! val_loss={best_val_loss:.4f}")
 
-    # ── Save final model + training history ──
     save_checkpoint(
         train_cfg.checkpoint_path / "final.pt",
         train_cfg.epochs, model, loss_fn, terrain_head,
