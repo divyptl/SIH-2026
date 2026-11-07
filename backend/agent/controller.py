@@ -293,16 +293,15 @@ class AgenticController:
             )
         )
 
-        # 7. Physics Verification Intercept
+       # 7. Physics Verification Intercept
         step_timer = _Timer()
         query_lower = query.lower()
         if any(k in query_lower for k in _PHYSICS_KEYWORDS):
             try:
-                from services.physics_service import process_image_physics, run_verification
+                from services.physics_service import process_images_physics, run_verification
 
-                raw_bytes = base64.b64decode(images[0].data_uri.split(",", 1)[1])
-                physics_context = process_image_physics(raw_bytes, query)
-                h, w = physics_context["vlm_input"].shape[:2]
+                physics_context = await asyncio.to_thread(process_images_physics, images, query)
+                h, w = physics_context["primary_shape"]
 
                 first_box = next((ev.data for ev in evidence if ev.type == "bbox" and ev.data), None)
                 vlm_bbox = (
@@ -316,11 +315,13 @@ class AgenticController:
                     else None
                 )
 
-                ver_result = run_verification(
+                ver_result = await asyncio.to_thread(
+                    run_verification,
                     query=query,
                     vlm_confidence=confidence,
                     vlm_bbox=vlm_bbox,
                     physics_context=physics_context,
+                    is_specialist=domain_adapted,
                 )
                 if ver_result:
                     confidence = ver_result.verified_confidence
@@ -329,7 +330,11 @@ class AgenticController:
                         TraceStep(
                             stage="verification",
                             tool="physics-verifier",
-                            params={"claim": ver_result.claim_type, "modality_used": ver_result.modality_used},
+                            params={
+                                "claim": ver_result.claim_type,
+                                "modality_used": ver_result.modality_used,
+                                **ver_result.physical_metrics,
+                            },
                             detail=ver_result.audit_explanation,
                             duration_ms=step_timer.ms(),
                         )

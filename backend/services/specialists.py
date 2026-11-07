@@ -429,29 +429,64 @@ def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
 
 
 def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
-    """Run the dual encoder on a co-registered optical + SAR pair.
+    """Run the dual encoder + deterministic SAR/Optical physics pipeline on a pair."""
+    import sys
+    ml_dir = str(REPO_ROOT / "ml")
+    if ml_dir not in sys.path:
+        sys.path.insert(0, ml_dir)
 
-    Returns specialist evidence (terrain classification, cross-modal similarity,
-    NDWI water index, SAR water mask) **without** a canned answer.  The
-    controller detects the missing answer and calls the VLM baseline with the
-    specialist context injected so the language model can answer the user's
-    actual question informed by domain-adapted data.
-    """
+    from fusion.sar_physics import coregister_optical_sar, process_sar_physics
+    from verification.physics_verifier import verify_landcover_claim, verify_water_claim
+
     by_modality = {image.info.modality: image for image in images}
-    sar = _pil(by_modality["sar"])
-    optical = _pil(by_modality["optical"])
+    sar_img = _pil(by_modality["sar"])
+    opt_img = _pil(by_modality["optical"])
     sar_index = by_modality["sar"].info.index
 
+    # 1. Run trained Dual-Encoder Specialist
     specialist = _fusion.get()
-    similarity = specialist.compare(sar, optical)
-    terrain, confidence, probabilities = specialist.classify_terrain(sar, optical)
+    similarity = specialist.compare(sar_img, opt_img)
+    terrain, confidence, probabilities = specialist.classify_terrain(sar_img, opt_img)
 
-    # Full analysis includes NDWI and SAR water mask
-    analysis = specialist.get_analysis(sar, optical)
+    # 2. Run True SAR Physics Calibration (Refined Lee 7x7 + Sigma0 dB + GLCM Homogeneity)
+    sar_np = np.array(sar_img)
+    opt_np = np.array(opt_img.convert("RGB"))
+    vv_band = sar_np[:, :, 0] if sar_np.ndim == 3 else sar_np
+    vh_band = sar_np[:, :, 1] if (sar_np.ndim == 3 and sar_np.shape[2] >= 2) else None
+
+    sar_phys = process_sar_physics(vv_band, vh_band)
+
+    # 3. Sub-pixel Optical-SAR Co-registration check
+    reg_note = ""
+    if opt_np.shape[:2] == sar_phys.sigma0_vv_db.shape:
+        aligned_vv, reg_meta = coregister_optical_sar(
+            opt_np[:, :, 1].astype(np.float32), sar_phys.sigma0_vv_db
+        )
+        sar_phys.sigma0_vv_db = aligned_vv
+        reg_note = (
+            f"Sub-pixel co-registration shift: dx={reg_meta['shift_x_px']}px, "
+            f"dy={reg_meta['shift_y_px']}px (error={reg_meta['registration_error']})."
+        )
+
+    # 4. Cross-Modal Physics Verification (Water, Built-up, Vegetation)
+    red = opt_np[:, :, 0].astype(np.float32)
+    green = opt_np[:, :, 1].astype(np.float32)
+    # Use specialist get_analysis() for NDWI if available, plus our physics verifier
+    analysis = specialist.get_analysis(sar_img, opt_img)
     water_info = analysis.get("water", {})
-    ndwi_water_pct = water_info.get("ndwi_water_pixel_ratio", 0.0)
-    sar_water_pct = water_info.get("sar_water_pixel_ratio", 0.0)
     ndwi_mean = water_info.get("ndwi_mean", 0.0)
+    ndwi_water_pct = water_info.get("ndwi_water_pixel_ratio", 0.0)
+    sar_water_pct = sar_phys.metadata["water_pixel_fraction_est"]
+    vv_db_mean = sar_phys.metadata["vv_db_mean"]
+
+    water_ver = verify_water_claim(
+        model_confidence=confidence,
+        green=green,
+        nir=red,
+        sar_vv_db=sar_phys.sigma0_vv_db,
+        sar_homogeneity=sar_phys.glcm_homogeneity,
+        is_specialist=True,
+    )
 
     ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
     terrain_summary = ", ".join(
@@ -461,45 +496,46 @@ def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
     evidence = [
         {
             "description": (
-                f"Terrain probabilities from the fused optical and SAR features: "
-                f"{terrain_summary}."
+                f"Terrain probabilities from fused optical and SAR features: {terrain_summary}."
             ),
             "image_index": sar_index,
         },
         {
             "description": (
-                f"Optical\u2013SAR embedding similarity is {similarity:.2f} "
-                "(1 means the two views agree strongly; low values suggest a "
-                "misaligned or mismatched pair)."
+                f"Optical–SAR embedding cosine similarity is {similarity:.2f}. {reg_note}".strip()
             ),
             "image_index": sar_index,
         },
         {
             "description": (
-                f"NDWI (Normalized Difference Water Index) analysis: "
-                f"mean NDWI = {ndwi_mean:.3f}, "
-                f"{ndwi_water_pct:.0%} of optical pixels indicate water "
-                f"(NDWI > 0). SAR low-backscatter water mask: "
-                f"{sar_water_pct:.0%} of SAR pixels indicate smooth water."
+                f"SAR Physics (Refined Lee 7x7): mean Sigma0 VV = {vv_db_mean:.2f} dB, "
+                f"specular water fraction (< -15 dB & high GLCM homogeneity) = {sar_water_pct:.1%}. "
+                f"Optical NDWI mean = {ndwi_mean:.3f} ({ndwi_water_pct:.1%} water pixels)."
             ),
+            "image_index": sar_index,
+        },
+        {
+            "description": f"Cross-Modal Physics Verifier [{water_ver.status}]: {water_ver.audit_explanation}",
             "image_index": sar_index,
         },
     ]
 
-    # Plain text: the UI and the PDF report show the answer as-is, not as Markdown.
     best_terrain_name = TERRAIN_NAMES.get(terrain, terrain)
     answer = (
         f"Based on the fused optical and SAR analysis, this region is classified as {best_terrain_name} "
         f"with {confidence:.0%} confidence.\n\n"
-        f"Supporting analysis:\n"
-        f"- The optical and SAR embeddings have a cosine similarity of {similarity:.2f}.\n"
-        f"- NDWI analysis shows {ndwi_water_pct:.0%} of the area is water (mean NDWI: {ndwi_mean:.3f}).\n"
-        f"- SAR backscatter mask shows {sar_water_pct:.0%} of the area is smooth water.\n"
+        f"Supporting physics & neural analysis:\n"
+        f"- Optical and SAR embeddings have a cosine similarity of {similarity:.2f}. {reg_note}\n"
+        f"- Calibrated SAR Backscatter (Refined Lee): mean VV = {vv_db_mean:.2f} dB; "
+        f"{sar_water_pct:.1%} of the scene exhibits smooth specular water reflection (< -15 dB).\n"
+        f"- Optical NDWI analysis shows {ndwi_water_pct:.1%} water coverage (mean NDWI: {ndwi_mean:.3f}).\n"
+        f"- Physics Verifier Status: {water_ver.status} ({water_ver.audit_explanation})\n"
         f"Top predicted terrains: {terrain_summary}."
     )
 
     return {
         "answer": answer,
-        "confidence": confidence,
+        "confidence": water_ver.verified_confidence if "water" in query.lower() else confidence,
         "evidence": evidence,
+        "specialist_context": answer,
     }
