@@ -1,5 +1,6 @@
 """
-Inference utilities for the trained Optical-SAR Dual Encoder with Physics Pre-processing.
+Inference utilities for the trained Optical-SAR Dual Encoder with Physics Pre-processing
+and Dense Cross-Modal Disagreement / Cloud-Penetration Mapping.
 """
 
 from __future__ import annotations
@@ -68,10 +69,16 @@ class FusionModel:
         terrain_head = None
         if "terrain_head" in ckpt:
             backbone_name = cfg.get("backbone", "resnet50")
-            feat_dim = 768 if backbone_name == "convnext_tiny" else (512 if backbone_name in ("resnet18", "resnet34") else 2048)
+            feat_dim = (
+                768
+                if backbone_name == "convnext_tiny"
+                else (512 if backbone_name in ("resnet18", "resnet34") else 2048)
+            )
             num_classes = ckpt["terrain_head"]["classifier.3.weight"].shape[0]
             use_gate = any(k.startswith("sar_gate") for k in ckpt["terrain_head"])
-            terrain_head = TerrainClassifier(feature_dim=feat_dim, num_classes=num_classes, use_cross_gate=use_gate)
+            terrain_head = TerrainClassifier(
+                feature_dim=feat_dim, num_classes=num_classes, use_cross_gate=use_gate
+            )
             terrain_head.load_state_dict(ckpt["terrain_head"])
 
         instance = cls(model=model, terrain_head=terrain_head, device=device)
@@ -79,7 +86,9 @@ class FusionModel:
             instance.TERRAIN_CLASSES = cls.TERRAIN_CLASSES[:num_classes]
         return instance
 
-    def _to_raw_tensor(self, image: str | Path | Image.Image | torch.Tensor, modality: str) -> torch.Tensor:
+    def _to_raw_tensor(
+        self, image: str | Path | Image.Image | torch.Tensor, modality: str
+    ) -> torch.Tensor:
         """Convert path, PIL.Image, or Tensor to an unnormalized [0, 1] resized tensor (C, H, W)."""
         if isinstance(image, torch.Tensor):
             t = image.detach().cpu()
@@ -98,7 +107,6 @@ class FusionModel:
                 tensor = torch.from_numpy(arr.transpose(2, 0, 1))
             else:
                 gray = np.array(pil_img.convert("L"), dtype=np.float32) / 255.0
-                # Apply Refined Lee filter to suppress speckle while preserving edges
                 gray_filtered = refined_lee_filter(gray, window_size=5, enl=4.4)
                 tensor = torch.from_numpy(np.clip(gray_filtered, 0.0, 1.0)).unsqueeze(0)
         else:
@@ -134,6 +142,22 @@ class FusionModel:
         return F.cosine_similarity(sar_emb, opt_emb).item()
 
     @torch.no_grad()
+    def compute_alignment_map(
+        self,
+        sar_image,
+        optical_image,
+        out_size: tuple[int, int] | None = None,
+    ) -> np.ndarray:
+        """
+        Computes a dense (H, W) cosine similarity map in [-1, 1] between SAR and Optical patches.
+        """
+        target_size = out_size or (self.image_size, self.image_size)
+        sar_tensor = self._prepare_tensor(sar_image, "sar")
+        opt_tensor = self._prepare_tensor(optical_image, "optical")
+        sim_map = self.model.compute_dense_similarity_map(sar_tensor, opt_tensor, out_size=target_size)
+        return sim_map.squeeze().cpu().numpy()
+
+    @torch.no_grad()
     def classify_terrain(self, sar_image, optical_image) -> tuple[str, float, dict[str, float]]:
         if self.terrain_head is None:
             raise RuntimeError("No terrain classification head was loaded.")
@@ -151,10 +175,15 @@ class FusionModel:
         )
 
     @torch.no_grad()
-    def embed_batch(self, image_paths: list[str | Path], modality: str, batch_size: int = 32) -> np.ndarray:
+    def embed_batch(
+        self, image_paths: list[str | Path], modality: str, batch_size: int = 32
+    ) -> np.ndarray:
         all_embeddings = []
         for i in range(0, len(image_paths), batch_size):
-            batch = torch.cat([self._load_and_preprocess(p, modality) for p in image_paths[i : i + batch_size]], dim=0)
+            batch = torch.cat(
+                [self._load_and_preprocess(p, modality) for p in image_paths[i : i + batch_size]],
+                dim=0,
+            )
             emb = self.model.encode_sar(batch) if modality == "sar" else self.model.encode_optical(batch)
             all_embeddings.append(emb.cpu())
         return torch.cat(all_embeddings, dim=0).numpy()
@@ -167,9 +196,15 @@ class FusionModel:
         gallery_embeddings: np.ndarray,
         top_k: int = 5,
     ) -> list[tuple[int, float]]:
-        query_emb = self.embed_sar(query_image) if query_modality == "sar" else self.embed_optical(query_image)
+        query_emb = (
+            self.embed_sar(query_image)
+            if query_modality == "sar"
+            else self.embed_optical(query_image)
+        )
         query_norm = query_emb / (np.linalg.norm(query_emb) + 1e-8)
-        gallery_norm = gallery_embeddings / (np.linalg.norm(gallery_embeddings, axis=1, keepdims=True) + 1e-8)
+        gallery_norm = gallery_embeddings / (
+            np.linalg.norm(gallery_embeddings, axis=1, keepdims=True) + 1e-8
+        )
         sims = gallery_norm @ query_norm
         top_indices = np.argsort(sims)[::-1][:top_k]
         return [(int(idx), float(sims[idx])) for idx in top_indices]
@@ -189,7 +224,6 @@ class FusionModel:
                 "probabilities": all_probs,
             }
 
-        # Always compute NDWI and SAR water masks on unnormalized [0, 1] tensors
         raw_opt = self._to_raw_tensor(optical_image, "optical")
         raw_sar = self._to_raw_tensor(sar_image, "sar")
 
@@ -200,9 +234,23 @@ class FusionModel:
         sar_water = compute_sar_water_mask(raw_sar)
         sar_water_ratio = float(sar_water.mean().item())
 
+        # Compute Dense Patch-Level Disagreement / Cloud-Penetration Mask
+        sim_map = self.compute_alignment_map(
+            sar_image, optical_image, out_size=(self.image_size, self.image_size)
+        )
+        opt_water_np = (ndwi_map.squeeze(0).cpu().numpy() > 0.0).astype(np.float32)
+        sar_water_np = sar_water.squeeze(0).cpu().numpy().astype(np.float32)
+
+        # Disagreement score in [0, 1]: high where neural patch embeddings diverge OR physical water masks diverge
+        neural_divergence = np.clip(0.5 * (1.0 - sim_map), 0.0, 1.0)
+        physical_divergence = np.abs(sar_water_np - opt_water_np)
+        disagreement_prob = np.clip(0.6 * neural_divergence + 0.4 * physical_divergence, 0.0, 1.0)
+
         result["water"] = {
             "ndwi_mean": round(ndwi_mean, 4),
             "ndwi_water_pixel_ratio": round(water_pixel_ratio, 4),
             "sar_water_pixel_ratio": round(sar_water_ratio, 4),
+            "cross_modal_disagreement_ratio": round(float((disagreement_prob >= 0.45).mean()), 4),
         }
+        result["disagreement_mask"] = disagreement_prob
         return result

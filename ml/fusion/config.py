@@ -36,7 +36,7 @@ class ModelConfig:
     # Backbone
     backbone: str = os.getenv("SATQUERY_BACKBONE", "convnext_tiny")
     pretrained: bool = _env_bool("SATQUERY_PRETRAINED", True)
-    sar_in_channels: int = _env_int("SATQUERY_SAR_CHANNELS", 1)  # 1 or 3 (3-ch Physics Tensor)
+    sar_in_channels: int = _env_int("SATQUERY_SAR_CHANNELS", 1)
 
     # Projection head
     embed_dim: int = _env_int("SATQUERY_EMBED_DIM", 256)
@@ -51,9 +51,10 @@ class ModelConfig:
     # Cross-Modal Gating in TerrainClassifier
     use_cross_gate: bool = _env_bool("SATQUERY_USE_CROSS_GATE", True)
 
-    # Contrastive loss
+    # Contrastive loss & Hard-Negative Mining
     temperature: float = _env_float("SATQUERY_TEMPERATURE", 0.07)
     learn_temperature: bool = _env_bool("SATQUERY_LEARN_TEMP", True)
+    hard_negative_weight: float = _env_float("SATQUERY_HARD_NEG_WEIGHT", 1.25)
 
 
 @dataclass
@@ -83,9 +84,10 @@ class TrainConfig:
     warmup_epochs: int = _env_int("SATQUERY_WARMUP_EPOCHS", 5)
     min_lr: float = _env_float("SATQUERY_MIN_LR", 1e-7)
 
-    # Terrain classification (multi-task)
+    # Multi-task Auxiliary Objectives (Terrain + 2D Fourier Phase Alignment)
     use_terrain_head: bool = _env_bool("SATQUERY_USE_TERRAIN_HEAD", True)
     terrain_loss_weight: float = _env_float("SATQUERY_TERRAIN_WEIGHT", 0.1)
+    phase_loss_weight: float = _env_float("SATQUERY_PHASE_WEIGHT", 0.05)
 
     # Checkpointing
     checkpoint_dir: str = os.getenv("SATQUERY_CKPT_DIR", "checkpoints/fusion/v3")
@@ -117,8 +119,8 @@ class TrainConfig:
 
     def auto_scale_hardware(self) -> None:
         """
-        Optional helper: inspects GPU VRAM (e.g., 32GB on RTX 5090 vs 24GB on 4090 vs 6GB laptop)
-        and CPU core count to set optimal batch_size and num_workers if not explicitly overridden.
+        Inspects GPU VRAM (e.g., 32GB on RTX 5090 vs 24GB on 4090 vs 6GB laptop)
+        and CPU core count to set optimal batch_size and num_workers if not overridden.
         """
         import torch
 

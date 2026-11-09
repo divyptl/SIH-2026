@@ -1,5 +1,6 @@
 """
-Dual-Encoder model for Optical-SAR contrastive alignment and Cross-Modal Terrain Classification.
+Dual-Encoder model for Optical-SAR contrastive alignment, Dense Spatial Alignment Maps,
+2D Fourier Phase-Consistency Loss, Hard-Negative Terrain Mining, and Cross-Gated Classification.
 """
 
 from __future__ import annotations
@@ -30,7 +31,9 @@ def _make_backbone(name: str, pretrained: bool, in_channels: int) -> tuple[nn.Mo
             )
             if pretrained:
                 with torch.no_grad():
-                    new_conv.weight[:] = old_conv.weight.mean(dim=1, keepdim=True).repeat(1, in_channels, 1, 1) / in_channels
+                    new_conv.weight[:] = (
+                        old_conv.weight.mean(dim=1, keepdim=True).repeat(1, in_channels, 1, 1) / in_channels
+                    )
                     if old_conv.bias is not None:
                         new_conv.bias[:] = old_conv.bias
             base.features[0][0] = new_conv
@@ -57,7 +60,9 @@ def _make_backbone(name: str, pretrained: bool, in_channels: int) -> tuple[nn.Mo
         )
         if pretrained:
             with torch.no_grad():
-                base.conv1.weight[:] = old_conv.weight.mean(dim=1, keepdim=True).repeat(1, in_channels, 1, 1) / in_channels
+                base.conv1.weight[:] = (
+                    old_conv.weight.mean(dim=1, keepdim=True).repeat(1, in_channels, 1, 1) / in_channels
+                )
 
     backbone = nn.Sequential(
         base.conv1, base.bn1, base.relu, base.maxpool,
@@ -91,7 +96,9 @@ class SelfAttentionBlock(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers, enable_nested_tensor=False
+        )
         self.norm = nn.LayerNorm(attn_dim)
         self.proj_out = nn.Linear(attn_dim, feat_dim)
         nn.init.zeros_(self.proj_out.weight)
@@ -149,11 +156,14 @@ class DualEncoder(nn.Module):
 
         self._cached_sar_feat: torch.Tensor | None = None
         self._cached_opt_feat: torch.Tensor | None = None
+        self._cached_sar_map: torch.Tensor | None = None
+        self._cached_opt_map: torch.Tensor | None = None
 
     def encode_sar(self, x: torch.Tensor) -> torch.Tensor:
         feat_map = self.sar_backbone(x)
         if self.use_attention:
             feat_map = self.sar_attention(feat_map)
+        self._cached_sar_map = feat_map
         features = self.pool(feat_map).flatten(1)
         self._cached_sar_feat = features
         return self.sar_projector(features)
@@ -162,6 +172,7 @@ class DualEncoder(nn.Module):
         feat_map = self.opt_backbone(x)
         if self.use_attention:
             feat_map = self.opt_attention(feat_map)
+        self._cached_opt_map = feat_map
         features = self.pool(feat_map).flatten(1)
         self._cached_opt_feat = features
         return self.opt_projector(features)
@@ -180,21 +191,110 @@ class DualEncoder(nn.Module):
             feat_map = self.sar_backbone(sar)
             if self.use_attention:
                 feat_map = self.sar_attention(feat_map)
+            self._cached_sar_map = feat_map
             sar_feat = self.pool(feat_map).flatten(1)
         if opt_feat is None and optical is not None:
             feat_map = self.opt_backbone(optical)
             if self.use_attention:
                 feat_map = self.opt_attention(feat_map)
+            self._cached_opt_map = feat_map
             opt_feat = self.pool(feat_map).flatten(1)
 
         if sar_feat is None or opt_feat is None:
             raise RuntimeError("Backbone features unavailable. Call forward() first or pass input tensors.")
         return sar_feat, opt_feat
 
+    def get_spatial_feature_maps(
+        self,
+        sar: torch.Tensor | None = None,
+        optical: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return unpooled (B, C, H, W) spatial feature maps for Fourier phase alignment & dense maps."""
+        sar_map, opt_map = self._cached_sar_map, self._cached_opt_map
+        if sar_map is None and sar is not None:
+            sar_map = self.sar_backbone(sar)
+            if self.use_attention:
+                sar_map = self.sar_attention(sar_map)
+        if opt_map is None and optical is not None:
+            opt_map = self.opt_backbone(optical)
+            if self.use_attention:
+                opt_map = self.opt_attention(opt_map)
+        if sar_map is None or opt_map is None:
+            raise RuntimeError("Spatial feature maps unavailable. Call forward() first or pass input tensors.")
+        return sar_map, opt_map
+
+    @torch.no_grad()
+    def compute_dense_similarity_map(
+        self,
+        sar: torch.Tensor,
+        optical: torch.Tensor,
+        out_size: tuple[int, int] = (224, 224),
+    ) -> torch.Tensor:
+        """
+        Projects each spatial grid cell (e.g., 7x7 tokens) through the modality projectors
+        and computes a dense pixel-level cosine similarity map upsampled to `out_size`.
+        Low similarity regions localize clouds, terrain shadows, or structural changes.
+        """
+        sar_map, opt_map = self.get_spatial_feature_maps(sar, optical)
+        B, C, H, W = sar_map.shape
+
+        sar_tokens = sar_map.permute(0, 2, 3, 1).reshape(B * H * W, C)
+        opt_tokens = opt_map.permute(0, 2, 3, 1).reshape(B * H * W, C)
+
+        sar_proj = self.sar_projector(sar_tokens).view(B, H, W, -1)
+        opt_proj = self.opt_projector(opt_tokens).view(B, H, W, -1)
+
+        # Token-wise cosine similarity: (B, 1, H, W)
+        sim_grid = (sar_proj * opt_proj).sum(dim=-1, keepdim=True).permute(0, 3, 1, 2)
+        return F.interpolate(sim_grid, size=out_size, mode="bilinear", align_corners=False)
+
+
+class FourierPhaseLoss(nn.Module):
+    """
+    2D Fast Fourier Transform (FFT) Phase-Consistency Loss.
+    Aligns structural edges and geometric boundaries across SAR and Optical feature maps
+    in the frequency phase domain while remaining invariant to amplitude/intensity inversions.
+    """
+
+    def __init__(self, eps: float = 1e-8) -> None:
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, sar_map: torch.Tensor, opt_map: torch.Tensor) -> torch.Tensor:
+        # Compute L2 spatial energy map across channels: (B, H, W) in float32 for FFT stability
+        sar_energy = torch.linalg.vector_norm(sar_map.float(), ord=2, dim=1)
+        opt_energy = torch.linalg.vector_norm(opt_map.float(), ord=2, dim=1)
+
+        # Zero-mean spatial maps before 2D real FFT
+        sar_energy = sar_energy - sar_energy.mean(dim=(-2, -1), keepdim=True)
+        opt_energy = opt_energy - opt_energy.mean(dim=(-2, -1), keepdim=True)
+
+        fft_sar = torch.fft.rfft2(sar_energy, norm="ortho")
+        fft_opt = torch.fft.rfft2(opt_energy, norm="ortho")
+
+        # Isolate phase by normalizing complex coefficients to unit magnitude
+        unit_sar = fft_sar / (fft_sar.abs() + self.eps)
+        unit_opt = fft_opt / (fft_opt.abs() + self.eps)
+
+        # Cosine of phase difference Re(e^{i(\phi_sar - \phi_opt)})
+        phase_cos = (unit_sar * torch.conj(unit_opt)).real
+        return (1.0 - phase_cos).mean()
+
 
 class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature: float = 0.07, learn_temperature: bool = True) -> None:
+    """
+    NT-Xent (InfoNCE) loss with Hard-Negative Terrain Mining.
+    Off-diagonal pairs sharing the same terrain class receive a hard-negative margin boost.
+    """
+
+    def __init__(
+        self,
+        temperature: float = 0.07,
+        learn_temperature: bool = True,
+        hard_negative_weight: float = 1.25,
+    ) -> None:
         super().__init__()
+        self.hard_negative_weight = hard_negative_weight
         init_val = torch.tensor(math.log(1.0 / temperature))
         if learn_temperature:
             self.log_temperature = nn.Parameter(init_val)
@@ -209,14 +309,33 @@ class ContrastiveLoss(nn.Module):
         self,
         sar_embeds: torch.Tensor,
         opt_embeds: torch.Tensor,
+        terrain_labels: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        logits = self.log_temperature.exp() * (sar_embeds @ opt_embeds.T)
-        labels = torch.arange(sar_embeds.shape[0], device=sar_embeds.device)
-        loss = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2.0
+        batch_size = sar_embeds.shape[0]
+        raw_logits = self.log_temperature.exp() * (sar_embeds @ opt_embeds.T)
+        labels = torch.arange(batch_size, device=sar_embeds.device)
+
+        if terrain_labels is not None and self.hard_negative_weight > 1.0:
+            valid = terrain_labels >= 0
+            same_terrain = (
+                (terrain_labels.unsqueeze(1) == terrain_labels.unsqueeze(0))
+                & valid.unsqueeze(1)
+                & valid.unsqueeze(0)
+            )
+            eye = torch.eye(batch_size, dtype=torch.bool, device=raw_logits.device)
+            hard_neg_mask = same_terrain & (~eye)
+            margin = math.log(self.hard_negative_weight)
+            logits_s2o = raw_logits + hard_neg_mask.to(raw_logits.dtype) * margin
+            logits_o2s = raw_logits.T + hard_neg_mask.T.to(raw_logits.dtype) * margin
+        else:
+            logits_s2o = raw_logits
+            logits_o2s = raw_logits.T
+
+        loss = (F.cross_entropy(logits_s2o, labels) + F.cross_entropy(logits_o2s, labels)) / 2.0
 
         with torch.no_grad():
-            s2o_acc = (logits.argmax(dim=1) == labels).float().mean().item()
-            o2s_acc = (logits.T.argmax(dim=1) == labels).float().mean().item()
+            s2o_acc = (raw_logits.argmax(dim=1) == labels).float().mean().item()
+            o2s_acc = (raw_logits.T.argmax(dim=1) == labels).float().mean().item()
 
         return loss, {
             "loss": loss.item(),
@@ -239,7 +358,6 @@ class TerrainClassifier(nn.Module):
         super().__init__()
         self.use_cross_gate = use_cross_gate
         if use_cross_gate:
-            # Cross-modal gating: SAR features modulate Optical features and vice versa
             self.sar_gate = nn.Sequential(nn.Linear(feature_dim, feature_dim), nn.Sigmoid())
             self.opt_gate = nn.Sequential(nn.Linear(feature_dim, feature_dim), nn.Sigmoid())
 

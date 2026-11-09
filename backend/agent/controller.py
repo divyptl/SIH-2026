@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
+import io
 import logging
 import re
 import time
 import uuid
 from typing import Any
+
+from PIL import Image
 
 from agent.narration import NarrationRejected, narrate
 from agent.registry import (
@@ -39,7 +43,26 @@ _GROUNDING_WORDS = re.compile(
     r"box|which part|position of|location of)\b",
     re.IGNORECASE,
 )
-_PHYSICS_KEYWORDS = ("water", "flood", "built", "vegetation")
+
+# Detects VQA interrogatives that ask a question about a specific grounded region/object
+_VQA_QUESTION_WORDS = re.compile(
+    r"\b(how many|count|number of|what is|what are|is there|are there|is the|"
+    r"condition|status|type of|kind of|damaged|intact|flooded|submerged)\b",
+    re.IGNORECASE,
+)
+
+# Spatial scoping prepositions/regions that trigger 2-hop Ground -> Crop -> VQA chaining
+_SPATIAL_SCOPE_WORDS = re.compile(
+    r"\b(in the|near the|around the|next to|beside|along the|at the|on the|"
+    r"top|bottom|left|right|centre|center|corner|bridge|river|water|lake|harbour|port|airport)\b",
+    re.IGNORECASE,
+)
+
+_PHYSICS_KEYWORDS = (
+    "water", "flood", "river", "lake", "inundat",
+    "built", "urban", "building", "settlement",
+    "vegetat", "forest", "crop", "green", "tree",
+)
 
 
 class ControllerError(RuntimeError):
@@ -129,6 +152,60 @@ def _coerce_evidence(raw: Any, image_count: int) -> list[Evidence]:
     return evidence
 
 
+def _should_run_two_hop(
+    configuration: InputConfiguration,
+    task: Task,
+    query: str,
+) -> bool:
+    """
+    Determines if a single-image query requires 2-Hop Agentic Chaining:
+    Hop 1 (rs-grounding) -> High-Res ROI Crop -> Hop 2 (rs-vqa).
+    """
+    if configuration != "single":
+        return False
+    g_entry = TOOL_REGISTRY.get("grounding")
+    v_entry = TOOL_REGISTRY.get("vqa")
+    if not (g_entry and v_entry and g_entry.specialist_available and v_entry.specialist_available):
+        return False
+
+    has_vqa_q = bool(_VQA_QUESTION_WORDS.search(query))
+    has_grounding_trigger = bool(_GROUNDING_WORDS.search(query)) or bool(_SPATIAL_SCOPE_WORDS.search(query))
+    return has_vqa_q and has_grounding_trigger
+
+
+def _crop_prepared_image(
+    image: PreparedImage,
+    norm_box: dict[str, float],
+    pad_ratio: float = 0.15,
+) -> tuple[PreparedImage, tuple[int, int, int, int]]:
+    """
+    Crops a PreparedImage around a normalized bounding box with context padding,
+    preserving native high-resolution pixels for downstream VQA inspection.
+    """
+    raw = base64.b64decode(image.data_uri.split(",", 1)[1])
+    pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
+    w, h = pil_img.size
+
+    bw = norm_box["x_max"] - norm_box["x_min"]
+    bh = norm_box["y_max"] - norm_box["y_min"]
+    x1 = max(0, int(round((norm_box["x_min"] - pad_ratio * bw) * w)))
+    y1 = max(0, int(round((norm_box["y_min"] - pad_ratio * bh) * h)))
+    x2 = min(w, int(round((norm_box["x_max"] + pad_ratio * bw) * w)))
+    y2 = min(h, int(round((norm_box["y_max"] + pad_ratio * bh) * h)))
+
+    if x2 <= x1 + 4 or y2 <= y1 + 4:
+        return image, (0, 0, w, h)
+
+    cropped_pil = pil_img.crop((x1, y1, x2, y2))
+    buf = io.BytesIO()
+    cropped_pil.save(buf, format="PNG")
+    cropped_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+    cropped_prep = copy.copy(image)
+    object.__setattr__(cropped_prep, "data_uri", cropped_uri)
+    return cropped_prep, (x1, y1, x2, y2)
+
+
 class AgenticController:
     def __init__(self, settings: Settings, client: OpenRouterClient) -> None:
         self._settings = settings
@@ -182,18 +259,22 @@ class AgenticController:
             warnings.append(f"Task '{task}' cannot run on a {configuration} input; fell back to '{corrected}'.")
             task, entry = corrected, TOOL_REGISTRY[corrected]
 
+        two_hop_active = (not task_override) and _should_run_two_hop(configuration, task, query)
+        if two_hop_active:
+            rationale += " Compound spatial-VQA query detected: chaining rs-grounding -> ROI crop -> rs-vqa."
+
         steps.append(
             TraceStep(
                 stage="classify",
                 tool="query-router",
                 model=None,
-                params={"input_configuration": configuration},
+                params={"input_configuration": configuration, "two_hop_chaining": two_hop_active},
                 detail=f"Task '{task}' ({task_source}). {rationale}",
                 duration_ms=step_timer.ms(),
             )
         )
 
-        # 3. Select tool
+        # 3. Select tool(s)
         step_timer = _Timer()
         use_specialist = entry.specialist_available
         if use_specialist:
@@ -203,63 +284,76 @@ class AgenticController:
         tool_name, backend, model_name, domain_adapted = (
             self._select(entry) if use_specialist else self._baseline(entry)
         )
+        selected_tools = [tool_name]
+        if two_hop_active:
+            g_entry = TOOL_REGISTRY["grounding"]
+            v_entry = TOOL_REGISTRY["vqa"]
+            selected_tools = [g_entry.name, "high-res-roi-cropper", v_entry.name]
+
         steps.append(
             TraceStep(
                 stage="select",
                 tool="tool-selector",
                 model=model_name,
-                params={"backend": backend, "permitted_params": list(entry.permitted_params)},
-                detail=f"Selected '{tool_name}' for task '{task}'.",
+                params={"backend": backend, "selected_tools": selected_tools},
+                detail=f"Selected {', '.join(selected_tools)} for task '{task}'.",
                 duration_ms=step_timer.ms(),
             )
         )
 
-        # 4. Execute
-        step_timer = _Timer()
+        # 4. Execute (Single-Hop or 2-Hop Agentic Chain)
         payload: dict[str, Any] | None = None
         specialist_payload: dict[str, Any] | None = None
         usage: dict[str, Any] = {}
-        params: dict[str, Any]
+        params: dict[str, Any] = {}
 
-        if domain_adapted and entry.runner is not None:
-            params = {"checkpoint": entry.checkpoint}
-            try:
-                payload = await asyncio.to_thread(entry.runner, query, images)
-            except Exception as exc:
-                logger.exception("Specialist '%s' failed; using the baseline", tool_name)
-                warnings.append(
-                    f"The fine-tuned specialist for '{task}' failed ({exc}); "
-                    "the generic VLM baseline answered instead."
-                )
-                tool_name, backend, model_name, domain_adapted = self._baseline(entry)
-
-            if payload is not None and not payload.get("answer"):
-                specialist_payload, payload = payload, None
+        if two_hop_active:
+            payload = await self._execute_two_hop_chain(query=query, images=images, steps=steps, warnings=warnings)
+            if payload is not None:
+                domain_adapted = True
+                model_name = f"{TOOL_REGISTRY['grounding'].specialist_model} -> {TOOL_REGISTRY['vqa'].specialist_model}"
 
         if payload is None:
-            params = {"temperature": 0.2, "max_tokens": 1400}
-            payload, usage = await self._execute_baseline(
-                task=task,
-                query=query,
-                images=images,
-                params=params,
-                specialist_context=specialist_payload.get("specialist_context") if specialist_payload else None,
-            )
-            if specialist_payload is not None:
-                payload["evidence"] = specialist_payload.get("evidence", []) + (payload.get("evidence") or [])
-                if payload.get("confidence") is None and specialist_payload.get("confidence") is not None:
-                    payload["confidence"] = specialist_payload["confidence"]
+            step_timer = _Timer()
+            if domain_adapted and entry.runner is not None:
+                params = {"checkpoint": entry.checkpoint}
+                try:
+                    payload = await asyncio.to_thread(entry.runner, query, images)
+                except Exception as exc:
+                    logger.exception("Specialist '%s' failed; using the baseline", tool_name)
+                    warnings.append(
+                        f"The fine-tuned specialist for '{task}' failed ({exc}); "
+                        "the generic VLM baseline answered instead."
+                    )
+                    tool_name, backend, model_name, domain_adapted = self._baseline(entry)
 
-        steps.append(
-            TraceStep(
-                stage="execute",
-                tool=tool_name,
-                model=model_name,
-                params={"backend": backend, **params},
-                detail=f"Ran {task} over {len(images)} image(s).",
-                duration_ms=step_timer.ms(),
+                if payload is not None and not payload.get("answer"):
+                    specialist_payload, payload = payload, None
+
+            if payload is None:
+                params = {"temperature": 0.2, "max_tokens": 1400}
+                payload, usage = await self._execute_baseline(
+                    task=task,
+                    query=query,
+                    images=images,
+                    params=params,
+                    specialist_context=specialist_payload.get("specialist_context") if specialist_payload else None,
+                )
+                if specialist_payload is not None:
+                    payload["evidence"] = specialist_payload.get("evidence", []) + (payload.get("evidence") or [])
+                    if payload.get("confidence") is None and specialist_payload.get("confidence") is not None:
+                        payload["confidence"] = specialist_payload["confidence"]
+
+            steps.append(
+                TraceStep(
+                    stage="execute",
+                    tool=tool_name,
+                    model=model_name,
+                    params={"backend": backend, **params},
+                    detail=f"Ran {task} over {len(images)} image(s).",
+                    duration_ms=step_timer.ms(),
+                )
             )
-        )
 
         # 5. Plain-language narration
         narration: Narration | None = None
@@ -293,7 +387,7 @@ class AgenticController:
             )
         )
 
-       # 7. Physics Verification Intercept
+        # 7. Physics Verification Intercept
         step_timer = _Timer()
         query_lower = query.lower()
         if any(k in query_lower for k in _PHYSICS_KEYWORDS):
@@ -357,7 +451,7 @@ class AgenticController:
                 task=task,
                 task_source=task_source,  # type: ignore[arg-type]
                 routing_rationale=rationale,
-                selected_tools=[tool_name],
+                selected_tools=selected_tools,
                 steps=steps,
                 total_duration_ms=total_ms,
                 domain_adapted=domain_adapted,
@@ -366,6 +460,95 @@ class AgenticController:
             usage=Usage(**usage) if usage else None,
             narration=narration,
         )
+
+    async def _execute_two_hop_chain(
+        self,
+        *,
+        query: str,
+        images: list[PreparedImage],
+        steps: list[TraceStep],
+        warnings: list[str],
+    ) -> dict[str, Any] | None:
+        """
+        Executes 2-Hop Agentic Chaining:
+        Hop 1: rs-grounding (with Physics Re-Ranker) to find Box 1.
+        Crop : High-resolution ROI crop around Box 1 (+15% context pad).
+        Hop 2: rs-vqa on the cropped ROI to answer the factual question.
+        """
+        g_entry = TOOL_REGISTRY["grounding"]
+        v_entry = TOOL_REGISTRY["vqa"]
+        if g_entry.runner is None or v_entry.runner is None:
+            return None
+
+        # Hop 1: Grounding
+        hop1_timer = _Timer()
+        try:
+            g_payload = await asyncio.to_thread(g_entry.runner, query, images)
+        except Exception as exc:
+            logger.warning("2-Hop Hop-1 (grounding) failed (%s); falling back to single-hop", exc)
+            return None
+
+        g_evidence = g_payload.get("evidence") or []
+        best_box = next((item["box"] for item in g_evidence if isinstance(item.get("box"), dict)), None)
+        steps.append(
+            TraceStep(
+                stage="execute",
+                tool=g_entry.name,
+                model=g_entry.specialist_model,
+                params={"hop": 1, "checkpoint": g_entry.checkpoint, "candidates_found": len(g_evidence)},
+                detail=f"Hop 1 (Grounding): localised {len(g_evidence)} candidate region(s) with physics re-ranking.",
+                duration_ms=hop1_timer.ms(),
+            )
+        )
+
+        if not best_box:
+            return g_payload
+
+        # Intermediate Step: High-Resolution ROI Crop
+        crop_timer = _Timer()
+        cropped_img, px_box = await asyncio.to_thread(_crop_prepared_image, images[0], best_box, 0.15)
+        steps.append(
+            TraceStep(
+                stage="crop",
+                tool="high-res-roi-cropper",
+                params={"bbox_px": list(px_box), "pad_ratio": 0.15},
+                detail=f"Cropped high-resolution ROI {px_box} around Box 1 for targeted VQA inspection.",
+                duration_ms=crop_timer.ms(),
+            )
+        )
+
+        # Hop 2: Targeted VQA on the High-Res Crop
+        hop2_timer = _Timer()
+        try:
+            v_payload = await asyncio.to_thread(v_entry.runner, query, [cropped_img])
+        except Exception as exc:
+            logger.warning("2-Hop Hop-2 (VQA) failed (%s); returning Hop-1 grounding result", exc)
+            warnings.append(f"Targeted VQA on cropped ROI failed ({exc}); showing grounding result.")
+            return g_payload
+
+        steps.append(
+            TraceStep(
+                stage="execute",
+                tool=v_entry.name,
+                model=v_entry.specialist_model,
+                params={"hop": 2, "checkpoint": v_entry.checkpoint},
+                detail=f"Hop 2 (Targeted VQA): answered query on high-resolution ROI crop (conf={v_payload.get('confidence', 0.0):.2f}).",
+                duration_ms=hop2_timer.ms(),
+            )
+        )
+
+        vqa_answer = str(v_payload.get("answer") or "").strip().rstrip(".")
+        g_answer = str(g_payload.get("answer") or "").strip()
+        combined_conf = round(
+            0.5 * float(g_payload.get("confidence", 0.5)) + 0.5 * float(v_payload.get("confidence", 0.5)),
+            4,
+        )
+
+        return {
+            "answer": f"{vqa_answer}. {g_answer}",
+            "confidence": combined_conf,
+            "evidence": g_evidence + (v_payload.get("evidence") or []),
+        }
 
     async def _narrate(
         self,

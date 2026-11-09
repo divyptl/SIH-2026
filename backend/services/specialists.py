@@ -1,27 +1,20 @@
-"""Fine-tuned remote-sensing specialists from ``ml/``, served in-process.
-
-Each runner is blocking (the controller calls it through ``asyncio.to_thread``)
-and returns the same payload the OpenRouter baseline produces -- ``answer``,
-``confidence`` and ``evidence`` with normalised ``box`` dicts -- so both paths
-are aggregated, translated and exported identically.
-
-Models load on first use, or at startup with SPECIALIST_PRELOAD, and stay
-cached for the life of the process. ``ml`` itself is imported lazily so the API
-still starts on a machine without the checkpoints or a GPU.
-"""
+"""Fine-tuned remote-sensing specialists from ``ml/``, served in-process."""
 
 from __future__ import annotations
 
 import base64
 import io
 import logging
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
+import cv2
 import numpy as np
 from PIL import Image
+from scipy.ndimage import uniform_filter
 
 from config import REPO_ROOT, get_settings
 from services.images import PreparedImage
@@ -30,13 +23,9 @@ logger = logging.getLogger("satquery.specialists")
 
 T = TypeVar("T")
 
-# Grounding returns the re-ranker's pick first, then other candidates above threshold.
 MAX_GROUNDING_BOXES = 5
-# Single-image VQA shows this many runner-up answers as evidence.
 VQA_ALTERNATIVES = 3
-# Below this confidence the VQA answer is flagged as uncertain.
 VQA_LOW_CONFIDENCE = 0.4
-# Longest edge of the change-mask overlay; matches the preview it is drawn on.
 MASK_OVERLAY_EDGE_PX = 768
 
 TERRAIN_NAMES = {
@@ -152,15 +141,10 @@ def preload(tasks: set[str]) -> None:
             logger.exception("Specialist preload failed; it will be retried on first use")
 
 
-# --- Runners ---------------------------------------------------------------------
+# --- Helpers ---------------------------------------------------------------------
 
 
 def box_position(x_min: float, y_min: float, x_max: float, y_max: float) -> str:
-    """Where a normalised box sits in the image, as 'top-left', 'right', 'centre', ...
-
-    Image-relative on purpose: an upload's orientation is unknown, so compass
-    directions would be guesses.
-    """
     cx, cy = (x_min + x_max) / 2, (y_min + y_max) / 2
     vertical = "top" if cy < 1 / 3 else "bottom" if cy > 2 / 3 else ""
     horizontal = "left" if cx < 1 / 3 else "right" if cx > 2 / 3 else ""
@@ -170,7 +154,6 @@ def box_position(x_min: float, y_min: float, x_max: float, y_max: float) -> str:
 
 
 def position_phrase(position: str) -> str:
-    """'top-left' -> 'in the top-left corner'; 'left' -> 'on the left side'."""
     if "-" in position:
         return f"in the {position} corner"
     return {
@@ -182,7 +165,6 @@ def position_phrase(position: str) -> str:
 
 
 def size_phrase(share: float) -> str:
-    """How much of the image a box covers, in words."""
     if share < 0.01:
         return "a very small area"
     if share < 0.05:
@@ -193,7 +175,6 @@ def size_phrase(share: float) -> str:
 
 
 def certainty_phrase(score: float) -> str:
-    """The grounding score in words a non-expert can use."""
     if score >= 0.7:
         return "confident"
     if score >= 0.4:
@@ -201,30 +182,141 @@ def certainty_phrase(score: float) -> str:
     return "not very confident"
 
 
-def run_grounding(query: str, images: list[PreparedImage]) -> dict[str, Any]:
-    """Localise the region the query refers to with the fine-tuned GroundingDINO.
+def _mask_overlay(mask_prob: np.ndarray, threshold: float) -> str:
+    """The mask as a PNG data URI: opaque where active, transparent elsewhere."""
+    changed = Image.fromarray(((mask_prob >= threshold) * 255).astype(np.uint8), "L")
+    height, width = mask_prob.shape
+    scale = min(1.0, MASK_OVERLAY_EDGE_PX / max(width, height))
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    overlay = Image.new("RGBA", size, (255, 255, 255, 0))
+    overlay.putalpha(changed.resize(size, Image.NEAREST))
+    buffer = io.BytesIO()
+    overlay.save(buffer, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
-    Besides the answer and evidence, the payload carries ``narration_facts``:
-    the boxes with their position, size and score, which the controller hands
-    to the narrator (agent/narration.py) as the only facts it may put into words.
+
+def format_km2(area: float) -> str:
+    if area < 1:
+        return f"{area:.2f} km²"
+    if area < 10:
+        return f"{area:.1f} km²"
+    return f"{area:.0f} km²"
+
+
+def _rerank_boxes_with_physics(
+    detections: list[dict[str, Any]],
+    images: list[PreparedImage],
+    query: str,
+) -> list[dict[str, Any]]:
     """
+    Physics-Guided Grounding Re-Ranker: scores every candidate box with
+    NDWI / NDVI / NDBI / SAR Sigma0 dB before sorting and picking Box 1.
+    """
+    if not detections:
+        return detections
+
+    try:
+        from services.physics_service import process_images_physics, run_verification
+
+        ctx = process_images_physics(images, query)
+        reranked: list[dict[str, Any]] = []
+
+        for det in detections:
+            x1, y1, x2, y2 = [int(round(v)) for v in det["box"]]
+            raw_score = float(det["score"])
+            ver = run_verification(
+                query=query,
+                vlm_confidence=raw_score,
+                vlm_bbox=(x1, y1, x2, y2),
+                physics_context=ctx,
+                is_specialist=True,
+            )
+            det_copy = dict(det)
+            if ver is not None:
+                # 65% neural GroundingDINO score + 35% physical index support
+                blended = 0.65 * raw_score + 0.35 * ver.supporting_pixel_fraction
+                if ver.status in ("CONTRADICTED", "SHADOW_REJECTED"):
+                    blended *= 0.45
+                elif ver.status == "CONFIRMED":
+                    blended = min(0.99, blended * 1.08)
+                det_copy["score"] = round(float(min(blended, 0.99)), 4)
+                det_copy["physics_status"] = ver.status
+                det_copy["physics_support"] = ver.supporting_pixel_fraction
+            reranked.append(det_copy)
+
+        reranked.sort(key=lambda d: d["score"], reverse=True)
+        return reranked
+    except Exception as exc:
+        logger.debug("Physics box re-ranking bypassed: %s", exc)
+        return detections
+
+
+def _compute_sar_optical_disagreement_mask(
+    opt_rgb: np.ndarray,
+    sar_vv_db: np.ndarray,
+    sar_homogeneity: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """
+    Computes a spatial probability map [0, 1] where SAR physics disambiguates
+    Optical ambiguities:
+      1. Cloud/haze penetration (bright flat optical vs strong SAR target/water).
+      2. Terrain/cloud shadow rejection (dark optical vs high SAR backscatter > -10 dB).
+      3. Turbid/sub-canopy flood water (low NDWI vs smooth SAR specular reflection < -15 dB).
+    """
+    h, w = sar_vv_db.shape
+    if opt_rgb.shape[:2] != (h, w):
+        opt_resized = cv2.resize(opt_rgb, (w, h), interpolation=cv2.INTER_LINEAR)
+    else:
+        opt_resized = opt_rgb
+
+    opt_f = opt_resized.astype(np.float32) / 255.0
+    red, green, blue = opt_f[:, :, 0], opt_f[:, :, 1], opt_f[:, :, 2]
+    luminance = (red + green + blue) / 3.0
+    pseudo_nir = 1.0 - luminance
+    ndwi = (green - pseudo_nir) / (green + pseudo_nir + 1e-6)
+
+    # 1. Cloud penetration: bright optical cloud (lum > 0.68) hiding SAR water (< -15 dB) or urban (> -7 dB)
+    cloud_mask = (luminance > 0.68) & ((sar_vv_db < -15.0) | (sar_vv_db > -7.0))
+
+    # 2. Shadow disambiguation: dark optical shadow (ndwi > 0.15) rejected by rough SAR (> -10 dB)
+    shadow_trap_mask = (ndwi > 0.15) & (sar_vv_db > -10.0)
+
+    # 3. Turbid/canopy water: missed by optical (ndwi <= 0.05) but caught by SAR specular water
+    turbid_water_mask = (ndwi <= 0.05) & (sar_vv_db < -15.0) & (sar_homogeneity > 0.60)
+
+    raw_disagreement = (cloud_mask | shadow_trap_mask | turbid_water_mask).astype(np.float32)
+    smoothed_prob = uniform_filter(raw_disagreement, size=5)
+    disagreed_share = float(np.mean(smoothed_prob >= 0.5))
+    return smoothed_prob, disagreed_share
+
+
+# --- Runners ---------------------------------------------------------------------
+
+
+def run_grounding(query: str, images: list[PreparedImage]) -> dict[str, Any]:
+    """Localise the region the query refers to with GroundingDINO + Physics Re-Ranker."""
     image = _pil(images[0]).convert("RGB")
     width, height = image.size
-    detections = _grounding.get().ground(image, query)[:MAX_GROUNDING_BOXES]
-    if not detections:
+    raw_detections = _grounding.get().ground(image, query)[:MAX_GROUNDING_BOXES]
+    if not raw_detections:
         return {
             "answer": f'No area in the image clearly matches "{query.strip()}".',
             "confidence": 0.0,
             "evidence": [],
         }
 
+    # Score and re-rank all candidate boxes with NDWI/NDVI/NDBI/SAR physics before picking Box 1
+    detections = _rerank_boxes_with_physics(raw_detections, images, query)
+
     evidence: list[dict[str, Any]] = []
     regions: list[dict[str, Any]] = []
     for rank, detection in enumerate(detections):
         x_min, y_min, x_max, y_max = detection["box"]
         box = (
-            max(0.0, x_min / width), max(0.0, y_min / height),
-            min(1.0, x_max / width), min(1.0, y_max / height),
+            max(0.0, x_min / width),
+            max(0.0, y_min / height),
+            min(1.0, x_max / width),
+            min(1.0, y_max / height),
         )
         position = box_position(*box)
         share = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
@@ -233,12 +325,12 @@ def run_grounding(query: str, images: list[PreparedImage]) -> dict[str, Any]:
         number = rank + 1
         role = "Best match" if rank == 0 else "Other possible match"
         label = detection["label"]
+        phys_status = detection.get("physics_status")
+        phys_tag = f" [Physics: {phys_status}]" if phys_status else ""
+
         evidence.append(
             {
-                "description": (
-                    f"{role}, {place}, covering {size_phrase(share)}."
-                ),
-                # With a re-ranker the label is the whole query; only keep short phrases.
+                "description": f"{role}, {place}, covering {size_phrase(share)}.{phys_tag}",
                 "label": label if label and label.lower() != query.lower().strip() else None,
                 "confidence": score,
                 "image_index": 0,
@@ -256,7 +348,6 @@ def run_grounding(query: str, images: list[PreparedImage]) -> dict[str, Any]:
                 "size": size_phrase(share),
                 "confidence": score,
                 "certainty": certainty_phrase(score),
-                # Appended by the controller after the narrator's sentence for the box.
                 "measure": f"{role}, {place}, covering {size_phrase(share)}.",
             }
         )
@@ -280,13 +371,7 @@ def run_grounding(query: str, images: list[PreparedImage]) -> dict[str, Any]:
 
 
 def run_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
-    """Answer a factual question about one image with the single-image VQA model.
-
-    The model picks its answer from a fixed vocabulary; the runner-up answers
-    are returned as evidence so an uncertain answer is visible as such.
-    Two-image questions never reach this runner: the registry only routes
-    single images to VQA, and image pairs go to Change-VQA or fusion.
-    """
+    """Answer a factual question about one image with the single-image VQA model."""
     if len(images) != 1:
         raise ValueError(f"Single-image VQA takes exactly one image, got {len(images)}")
     result = _vqa.get().answer(_pil(images[0]), query, top_k=VQA_ALTERNATIVES + 1)
@@ -296,19 +381,24 @@ def run_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
     alternatives = result["top"][1:]
     evidence: list[dict[str, Any]] = []
     if alternatives:
-        evidence.append({
-            "description": "Other likely answers: "
-            + ", ".join(f"{a} ({p:.0%})" for a, p in alternatives) + ".",
-            "image_index": 0,
-        })
+        evidence.append(
+            {
+                "description": "Other likely answers: "
+                + ", ".join(f"{a} ({p:.0%})" for a, p in alternatives)
+                + ".",
+                "image_index": 0,
+            }
+        )
     if confidence < VQA_LOW_CONFIDENCE:
-        evidence.append({
-            "description": (
-                f"The model is unsure ({confidence:.0%} confidence); treat this answer "
-                "with caution and check it against the image."
-            ),
-            "image_index": 0,
-        })
+        evidence.append(
+            {
+                "description": (
+                    f"The model is unsure ({confidence:.0%} confidence); treat this answer "
+                    "with caution and check it against the image."
+                ),
+                "image_index": 0,
+            }
+        )
     return {
         "answer": f"{answer[:1].upper()}{answer[1:]}.",
         "confidence": confidence,
@@ -321,44 +411,12 @@ def change_vqa_gsd_range() -> tuple[float, float]:
     return _change_vqa.get().gsd_range_m
 
 
-def _mask_overlay(mask_prob: np.ndarray, threshold: float) -> str:
-    """The change mask as a PNG data URI: opaque where changed, transparent elsewhere.
-
-    The client uses it as a CSS mask over a coloured layer, so the colour stays
-    a UI decision. It is stretched over the image, so only the aspect matters.
-    """
-    changed = Image.fromarray(((mask_prob >= threshold) * 255).astype(np.uint8), "L")
-    height, width = mask_prob.shape
-    scale = min(1.0, MASK_OVERLAY_EDGE_PX / max(width, height))
-    size = (max(1, round(width * scale)), max(1, round(height * scale)))
-    overlay = Image.new("RGBA", size, (255, 255, 255, 0))
-    overlay.putalpha(changed.resize(size, Image.NEAREST))
-    buffer = io.BytesIO()
-    overlay.save(buffer, format="PNG", optimize=True)
-    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
-
-
-def format_km2(area: float) -> str:
-    """An area in km², rounded to the precision a reader can use."""
-    if area < 1:
-        return f"{area:.2f} km²"
-    if area < 10:
-        return f"{area:.1f} km²"
-    return f"{area:.0f} km²"
-
-
 def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
-    """Answer a change question over a bi-temporal pair with the Siamese Change-VQA model.
-
-    Besides the answer and evidence, the payload carries ``narration_facts``:
-    everything the model measured, which the controller hands to the narrator
-    (agent/narration.py) as the only facts it may put into words.
-    """
+    """Answer a change question over a bi-temporal pair with the Siamese Change-VQA model."""
     specialist = _change_vqa.get()
     after = _pil(images[1])
     result = specialist.analyze_pair(_pil(images[0]), after, query)
 
-    # Ground area of the analysed raster, when the upload is georeferenced.
     gsd = images[1].analysis_gsd_m
     scene_km2 = after.width * after.height * gsd**2 / 1e6 if gsd else None
 
@@ -377,7 +435,6 @@ def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
                 f"{changed[:1].upper()}{changed[1:]} is predicted as changed, "
                 f"in {total} {'region' if total == 1 else 'regions'}."
             ),
-            # Shown on the later acquisition, where the change is visible.
             "image_index": 1,
             "mask": _mask_overlay(result["mask_prob"], specialist.config.mask_threshold),
         }
@@ -389,7 +446,6 @@ def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
         where = measure(region["share"], region["sector"])
         regions.append(
             {
-                # The number the region carries on screen: its 1-based evidence position.
                 "number": len(evidence) + 1,
                 "evidence_index": len(evidence),
                 "label": label,
@@ -405,7 +461,6 @@ def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
             {
                 "label": label,
                 "description": f"{label[:1].upper()}{label[1:]}: {where}.",
-                # How sure the model is of the label, the figure shown next to it.
                 "confidence": region["label_confidence"],
                 "image_index": 1,
                 "box": {"x_min": x_min, "y_min": y_min, "x_max": x_max, "y_max": y_max},
@@ -429,26 +484,23 @@ def run_change_vqa(query: str, images: list[PreparedImage]) -> dict[str, Any]:
 
 
 def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
-    """Run the dual encoder + deterministic SAR/Optical physics pipeline on a pair."""
-    import sys
+    """Run the dual encoder + deterministic SAR/Optical physics pipeline + Disagreement Mask."""
     ml_dir = str(REPO_ROOT / "ml")
     if ml_dir not in sys.path:
         sys.path.insert(0, ml_dir)
 
     from fusion.sar_physics import coregister_optical_sar, process_sar_physics
-    from verification.physics_verifier import verify_landcover_claim, verify_water_claim
+    from verification.physics_verifier import verify_water_claim
 
     by_modality = {image.info.modality: image for image in images}
     sar_img = _pil(by_modality["sar"])
     opt_img = _pil(by_modality["optical"])
     sar_index = by_modality["sar"].info.index
 
-    # 1. Run trained Dual-Encoder Specialist
     specialist = _fusion.get()
     similarity = specialist.compare(sar_img, opt_img)
     terrain, confidence, probabilities = specialist.classify_terrain(sar_img, opt_img)
 
-    # 2. Run True SAR Physics Calibration (Refined Lee 7x7 + Sigma0 dB + GLCM Homogeneity)
     sar_np = np.array(sar_img)
     opt_np = np.array(opt_img.convert("RGB"))
     vv_band = sar_np[:, :, 0] if sar_np.ndim == 3 else sar_np
@@ -456,7 +508,6 @@ def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
 
     sar_phys = process_sar_physics(vv_band, vh_band)
 
-    # 3. Sub-pixel Optical-SAR Co-registration check
     reg_note = ""
     if opt_np.shape[:2] == sar_phys.sigma0_vv_db.shape:
         aligned_vv, reg_meta = coregister_optical_sar(
@@ -468,10 +519,8 @@ def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
             f"dy={reg_meta['shift_y_px']}px (error={reg_meta['registration_error']})."
         )
 
-    # 4. Cross-Modal Physics Verification (Water, Built-up, Vegetation)
     red = opt_np[:, :, 0].astype(np.float32)
     green = opt_np[:, :, 1].astype(np.float32)
-    # Use specialist get_analysis() for NDWI if available, plus our physics verifier
     analysis = specialist.get_analysis(sar_img, opt_img)
     water_info = analysis.get("water", {})
     ndwi_mean = water_info.get("ndwi_mean", 0.0)
@@ -488,22 +537,34 @@ def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
         is_specialist=True,
     )
 
+    # Generate the SAR-Optical Disagreement / Cloud-Shadow Disambiguation Mask
+    disagreement_prob, disagreed_share = _compute_sar_optical_disagreement_mask(
+        opt_np, sar_phys.sigma0_vv_db, sar_phys.glcm_homogeneity
+    )
+    disagreement_png = _mask_overlay(disagreement_prob, threshold=0.5)
+
     ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
     terrain_summary = ", ".join(
         f"{TERRAIN_NAMES.get(name, name)} {p:.0%}" for name, p in ranked
     )
 
-    evidence = [
+    evidence: list[dict[str, Any]] = [
         {
+            "label": "SAR-Optical physics disagreement mask",
             "description": (
-                f"Terrain probabilities from fused optical and SAR features: {terrain_summary}."
+                f"{disagreed_share:.1%} of the scene exhibits cross-modal disagreement "
+                "(e.g., SAR penetrating cloud cover, rejecting dark optical terrain shadows, "
+                "or detecting turbid floodwater)."
             ),
+            "image_index": sar_index,
+            "mask": disagreement_png,
+        },
+        {
+            "description": f"Terrain probabilities from fused optical and SAR features: {terrain_summary}.",
             "image_index": sar_index,
         },
         {
-            "description": (
-                f"Optical–SAR embedding cosine similarity is {similarity:.2f}. {reg_note}".strip()
-            ),
+            "description": f"Optical–SAR embedding cosine similarity is {similarity:.2f}. {reg_note}".strip(),
             "image_index": sar_index,
         },
         {
@@ -529,6 +590,7 @@ def run_fusion(query: str, images: list[PreparedImage]) -> dict[str, Any]:
         f"- Calibrated SAR Backscatter (Refined Lee): mean VV = {vv_db_mean:.2f} dB; "
         f"{sar_water_pct:.1%} of the scene exhibits smooth specular water reflection (< -15 dB).\n"
         f"- Optical NDWI analysis shows {ndwi_water_pct:.1%} water coverage (mean NDWI: {ndwi_mean:.3f}).\n"
+        f"- Cross-Modal Disagreement Mask: {disagreed_share:.1%} of pixels disambiguated via radar physics.\n"
         f"- Physics Verifier Status: {water_ver.status} ({water_ver.audit_explanation})\n"
         f"Top predicted terrains: {terrain_summary}."
     )

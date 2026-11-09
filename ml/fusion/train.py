@@ -1,9 +1,11 @@
 """
 Training script for the Physics-Guided Optical-SAR Dual Encoder.
 
-Supports multi-domain contrastive learning (NT-Xent), multi-task Cross-Gated
-Terrain Classification, Refined Lee SAR Physics preprocessing, and dynamic
-CLI / hardware scaling across laptop, workstation (RTX 5090), or cloud GPUs.
+Includes:
+  - Hard-Negative Terrain Mining in NT-Xent ContrastiveLoss
+  - 2D Fourier Phase-Consistency Loss (FFT edge alignment across SAR & Optical)
+  - Cross-Gated Multi-Task Terrain Classification
+  - Refined Lee SAR Speckle Filtering + Multiplicative Gamma Speckle Augmentation
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-# Ensure both project root and ml/ are on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 ML_ROOT = Path(__file__).resolve().parent.parent
 for p in (str(PROJECT_ROOT), str(ML_ROOT)):
@@ -29,7 +30,12 @@ for p in (str(PROJECT_ROOT), str(ML_ROOT)):
 from ml.datasets.sen12 import SEN12Dataset
 from ml.datasets.qxs import QXSDataset
 from ml.fusion.config import ModelConfig, TrainConfig
-from ml.fusion.model import ContrastiveLoss, DualEncoder, TerrainClassifier
+from ml.fusion.model import (
+    ContrastiveLoss,
+    DualEncoder,
+    FourierPhaseLoss,
+    TerrainClassifier,
+)
 from ml.fusion.transforms import PairedTransform, normalize_optical, normalize_sar
 
 TERRAIN_TO_IDX = {"agri": 0, "barrenland": 1, "grassland": 2, "urban": 3, "water": 4}
@@ -64,6 +70,7 @@ def get_cosine_schedule(optimizer, warmup_epochs, total_epochs, min_lr, steps_pe
 def train_one_epoch(
     model: DualEncoder,
     loss_fn: ContrastiveLoss,
+    phase_loss_fn: FourierPhaseLoss,
     terrain_head: TerrainClassifier | None,
     train_loaders: list[DataLoader],
     optimizer: torch.optim.Optimizer,
@@ -83,6 +90,7 @@ def train_one_epoch(
 
     total_loss = 0.0
     total_contrastive = 0.0
+    total_phase = 0.0
     total_terrain = 0.0
     total_s2o_acc = 0.0
     total_o2s_acc = 0.0
@@ -94,6 +102,7 @@ def train_one_epoch(
     for step, batches in enumerate(zip(*train_loaders)):
         loss = torch.tensor(0.0, device=device)
         step_contrastive = 0.0
+        step_phase = 0.0
         step_terrain = 0.0
         step_s2o = 0.0
         step_o2s = 0.0
@@ -110,9 +119,22 @@ def train_one_epoch(
 
             with torch.amp.autocast(amp_device, enabled=use_amp):
                 sar_emb, opt_emb = model(sar, optical)
-                contrastive_loss, contrastive_metrics = loss_fn(sar_emb, opt_emb)
+
+                # 1. Hard-Negative Terrain-Aware Contrastive Loss
+                contrastive_loss, contrastive_metrics = loss_fn(
+                    sar_emb, opt_emb, terrain_labels=terrain_labels
+                )
                 domain_loss = contrastive_loss
 
+                # 2. 2D Fourier Phase-Consistency Loss on Spatial Feature Grids
+                domain_phase_loss = 0.0
+                if cfg.phase_loss_weight > 0.0:
+                    sar_map, opt_map = model.get_spatial_feature_maps()
+                    p_loss = phase_loss_fn(sar_map, opt_map)
+                    domain_loss = domain_loss + cfg.phase_loss_weight * p_loss
+                    domain_phase_loss = p_loss.item()
+
+                # 3. Cross-Gated Terrain Classification Loss
                 domain_terrain_loss = 0.0
                 domain_terrain_acc = 0.0
                 valid_mask = terrain_labels >= 0
@@ -136,6 +158,7 @@ def train_one_epoch(
 
             loss = loss + domain_loss.detach()
             step_contrastive += contrastive_metrics["loss"]
+            step_phase += domain_phase_loss
             step_terrain += domain_terrain_loss
             step_s2o += contrastive_metrics["sar2opt_acc"]
             step_o2s += contrastive_metrics["opt2sar_acc"]
@@ -159,6 +182,7 @@ def train_one_epoch(
 
         total_loss += loss.item()
         total_contrastive += step_contrastive / num_domains
+        total_phase += step_phase / num_domains
         total_terrain += step_terrain / num_domains
         total_s2o_acc += step_s2o / num_domains
         total_o2s_acc += step_o2s / num_domains
@@ -172,9 +196,10 @@ def train_one_epoch(
                 f"  [{epoch}][{step+1}/{num_steps}] "
                 f"loss={loss.item():.4f}  "
                 f"contra={step_contrastive/num_domains:.4f}  "
-                f"s2o_acc={step_s2o/num_domains:.1%}  "
-                f"o2s_acc={step_o2s/num_domains:.1%}  "
-                f"terrain_acc={step_terrain_acc/num_domains:.1%}  "
+                f"fft_phase={step_phase/num_domains:.4f}  "
+                f"s2o={step_s2o/num_domains:.1%}  "
+                f"o2s={step_o2s/num_domains:.1%}  "
+                f"terrain={step_terrain_acc/num_domains:.1%}  "
                 f"temp={last_temp:.4f}  "
                 f"lr={lr:.2e}"
             )
@@ -183,6 +208,7 @@ def train_one_epoch(
     return {
         "loss": total_loss / denom,
         "contrastive_loss": total_contrastive / denom,
+        "phase_loss": total_phase / denom,
         "terrain_loss": total_terrain / denom,
         "sar2opt_acc": total_s2o_acc / denom,
         "opt2sar_acc": total_o2s_acc / denom,
@@ -228,7 +254,9 @@ def evaluate(
                 if terrain_head is not None and valid_mask.any():
                     sar_feat, opt_feat = model.get_backbone_features()
                     terrain_logits = terrain_head(sar_feat[valid_mask], opt_feat[valid_mask])
-                    terrain_acc = (terrain_logits.argmax(1) == terrain_labels[valid_mask]).float().mean().item()
+                    terrain_acc = (
+                        (terrain_logits.argmax(1) == terrain_labels[valid_mask]).float().mean().item()
+                    )
                     total_terrain_acc += terrain_acc
                     terrain_batches += 1
 
@@ -277,6 +305,7 @@ def save_checkpoint(
             "attn_layers": model_cfg.attn_layers,
             "sar_in_channels": model_cfg.sar_in_channels,
             "use_cross_gate": model_cfg.use_cross_gate,
+            "hard_negative_weight": model_cfg.hard_negative_weight,
         },
     }
     if terrain_head is not None:
@@ -322,6 +351,8 @@ def main() -> None:
     parser.add_argument("--use-attention", action="store_true", help="Enable Self-Attention block")
     parser.add_argument("--no-cross-gate", action="store_true", help="Disable Cross-Modal Gating in TerrainHead")
     parser.add_argument("--apply-lee", action="store_true", help="Apply Refined Lee SAR filter during loading")
+    parser.add_argument("--phase-weight", type=float, default=None, help="Weight for 2D Fourier Phase Loss")
+    parser.add_argument("--hard-neg-weight", type=float, default=None, help="Hard-negative terrain multiplier")
     parser.add_argument("--detach-terrain", action="store_true", help="Detach backbone features before terrain head")
     parser.add_argument("--auto-hardware", action="store_true", help="Auto-scale batch_size & num_workers from VRAM/CPU")
     parser.add_argument("--dataset", type=str, default=None, choices=["sen12", "qxs", "both"])
@@ -352,8 +383,12 @@ def main() -> None:
         model_cfg.use_attention = True
     if args.no_cross_gate:
         model_cfg.use_cross_gate = False
+    if args.hard_neg_weight is not None:
+        model_cfg.hard_negative_weight = args.hard_neg_weight
     if args.apply_lee:
         train_cfg.apply_lee = True
+    if args.phase_weight is not None:
+        train_cfg.phase_loss_weight = args.phase_weight
     if args.epochs:
         train_cfg.epochs = args.epochs
     if args.dataset:
@@ -384,11 +419,11 @@ def main() -> None:
     device = train_cfg.resolve_device()
 
     print("=" * 70)
-    print("  Optical-SAR Physics-Guided Dual Encoder Training")
+    print("  Optical-SAR Physics & Frequency-Guided Dual Encoder Training")
     print("=" * 70)
     print(f"  Backbone:       {model_cfg.backbone} (SAR channels={model_cfg.sar_in_channels})")
     print(f"  Embed dim:      {model_cfg.embed_dim} (Proj hidden={model_cfg.projection_hidden})")
-    print(f"  Self-Attention: {model_cfg.use_attention}")
+    print(f"  Hard-Neg Mult:  {model_cfg.hard_negative_weight}x | FFT Phase Weight: {train_cfg.phase_loss_weight}")
     print(f"  Lee Speckle:    {train_cfg.apply_lee} (+ Gamma Multiplicative Speckle Aug)")
     print(f"  Terrain head:   {train_cfg.use_terrain_head} (Cross-Gate={model_cfg.use_cross_gate})")
     print(f"  Batch size:     {train_cfg.batch_size} | Workers: {train_cfg.num_workers}")
@@ -466,11 +501,18 @@ def main() -> None:
     loss_fn = ContrastiveLoss(
         temperature=model_cfg.temperature,
         learn_temperature=model_cfg.learn_temperature,
+        hard_negative_weight=model_cfg.hard_negative_weight,
     ).to(device)
+
+    phase_loss_fn = FourierPhaseLoss().to(device)
 
     terrain_head = None
     if train_cfg.use_terrain_head:
-        feat_dim = 768 if model_cfg.backbone == "convnext_tiny" else (512 if model_cfg.backbone in ("resnet18", "resnet34") else 2048)
+        feat_dim = (
+            768
+            if model_cfg.backbone == "convnext_tiny"
+            else (512 if model_cfg.backbone in ("resnet18", "resnet34") else 2048)
+        )
         terrain_head = TerrainClassifier(
             feature_dim=feat_dim,
             num_classes=len(TERRAIN_TO_IDX),
@@ -511,7 +553,7 @@ def main() -> None:
         t0 = time.time()
 
         train_metrics = train_one_epoch(
-            model, loss_fn, terrain_head, train_loaders,
+            model, loss_fn, phase_loss_fn, terrain_head, train_loaders,
             optimizer, scheduler, scaler, use_amp, device, epoch, train_cfg,
             detach_terrain=args.detach_terrain,
         )
@@ -534,6 +576,7 @@ def main() -> None:
         print(
             f"Epoch {epoch}/{train_cfg.epochs}  "
             f"loss={train_metrics['loss']:.4f}  "
+            f"phase={train_metrics['phase_loss']:.4f}  "
             f"s2o={train_metrics['sar2opt_acc']:.1%}  "
             f"o2s={train_metrics['opt2sar_acc']:.1%}  "
             f"terrain={train_metrics['terrain_acc']:.1%}"
